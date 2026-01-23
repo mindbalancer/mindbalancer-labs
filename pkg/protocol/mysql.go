@@ -124,6 +124,7 @@ type mysqlClient struct {
 	reader  *bufio.Reader
 	handler CommandHandler
 	seq     byte
+	seqSet  bool // track if we've read a packet to know the sequence
 }
 
 const (
@@ -263,6 +264,9 @@ func (c *mysqlClient) makeLengthEncodedString(s string) []byte {
 }
 
 func (c *mysqlClient) handleCommand() error {
+	// Reset sequence for each new command
+	c.seq = 0
+	
 	data, err := c.readPacket()
 	if err != nil {
 		return err
@@ -321,7 +325,7 @@ func (c *mysqlClient) readPacket() ([]byte, error) {
 	}
 
 	length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
-	c.seq = header[3]
+	c.seq = header[3] + 1 // Next packet we send should be seq+1
 
 	data := make([]byte, length)
 	if _, err := io.ReadFull(c.reader, data); err != nil {
@@ -332,8 +336,6 @@ func (c *mysqlClient) readPacket() ([]byte, error) {
 }
 
 func (c *mysqlClient) writePacket(data []byte) error {
-	c.seq++
-
 	header := make([]byte, 4)
 	header[0] = byte(len(data))
 	header[1] = byte(len(data) >> 8)
@@ -343,8 +345,12 @@ func (c *mysqlClient) writePacket(data []byte) error {
 	if _, err := c.conn.Write(header); err != nil {
 		return err
 	}
-	_, err := c.conn.Write(data)
-	return err
+	if _, err := c.conn.Write(data); err != nil {
+		return err
+	}
+	
+	c.seq++
+	return nil
 }
 
 // Helper function for little-endian encoding
