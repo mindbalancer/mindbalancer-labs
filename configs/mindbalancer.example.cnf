@@ -1,0 +1,71 @@
+# MindBalancer Configuration File
+# Copy this file to mindbalancer.cnf and modify as needed
+
+[mindbalancer]
+# Network Configuration
+admin_bind_address = 0.0.0.0
+admin_port = 6032
+proxy_bind_address = 0.0.0.0
+proxy_port = 6033
+
+# Storage Configuration
+data_dir = /var/lib/mindbalancer
+# SQLite database file will be created at: data_dir/mindbalancer.db
+
+# Logging Configuration
+log_level = info    # debug, info, warn, error
+log_format = json   # json, text
+log_file = /var/log/mindbalancer/mindbalancer.log
+# Set log_file to empty or "stdout" to log to stdout
+
+# Failover Configuration
+failover_enabled = true
+max_retries = 3
+retry_delay_ms = 100
+retry_max_delay_ms = 5000
+retry_multiplier = 2.0
+
+# Circuit Breaker Configuration
+circuit_breaker_enabled = true
+circuit_breaker_threshold = 5          # failures before opening
+circuit_breaker_timeout_ms = 30000     # time before half-open
+circuit_breaker_success_threshold = 2  # successes to close
+
+# Health Check Configuration
+health_check_enabled = true
+health_check_interval_ms = 5000
+health_check_timeout_ms = 3000
+
+# Connection Pool Configuration
+max_connections_per_server = 100
+connection_timeout_ms = 10000
+idle_timeout_ms = 60000
+
+# Request Configuration
+request_timeout_ms = 120000            # 2 minutes default
+max_request_body_size = 10485760       # 10MB
+
+# Rate Limiting (global defaults)
+rate_limit_enabled = true
+default_requests_per_minute = 1000
+default_tokens_per_minute = 100000
+
+# Metrics Configuration
+prometheus_enabled = true
+prometheus_port = 9090
+prometheus_path = /metrics
+
+# Security
+admin_username = admin
+admin_password_hash = ""               # Set via mindsql or leave empty for no auth
+api_key_encryption_key = ""            # 32-byte hex key for encrypting stored API keys
+
+# TLS Configuration (optional)
+tls_enabled = false
+tls_cert_file = /etc/mindbalancer/server.crt
+tls_key_file = /etc/mindbalancer/server.key
+
+# Cluster Configuration (future)
+cluster_enabled = false
+cluster_name = mindbalancer-cluster
+cluster_peers = []

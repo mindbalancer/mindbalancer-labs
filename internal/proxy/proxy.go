@@ -1,0 +1,459 @@
+// Package proxy provides the OpenAI-compatible API proxy.
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/mindbalancer/mindbalancer/api/openai"
+	"github.com/mindbalancer/mindbalancer/internal/balancer"
+	"github.com/mindbalancer/mindbalancer/internal/config"
+	"github.com/mindbalancer/mindbalancer/internal/metrics"
+	"github.com/mindbalancer/mindbalancer/internal/provider"
+	"github.com/mindbalancer/mindbalancer/internal/router"
+	"github.com/mindbalancer/mindbalancer/internal/storage"
+)
+
+// Proxy handles OpenAI-compatible API requests.
+type Proxy struct {
+	config   *config.Config
+	storage  *storage.Storage
+	balancer *balancer.Balancer
+	router   *router.Router
+	metrics  *metrics.Collector
+}
+
+// NewProxy creates a new proxy.
+func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, rtr *router.Router, met *metrics.Collector) *Proxy {
+	return &Proxy{
+		config:   cfg,
+		storage:  store,
+		balancer: bal,
+		router:   rtr,
+		metrics:  met,
+	}
+}
+
+// Handler returns the HTTP handler for the proxy.
+func (p *Proxy) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	// OpenAI-compatible endpoints
+	mux.HandleFunc("/v1/chat/completions", p.handleChatCompletions)
+	mux.HandleFunc("/v1/completions", p.handleCompletions)
+	mux.HandleFunc("/v1/embeddings", p.handleEmbeddings)
+	mux.HandleFunc("/v1/models", p.handleModels)
+
+	// Health endpoint
+	mux.HandleFunc("/health", p.handleHealth)
+	mux.HandleFunc("/healthz", p.handleHealth)
+
+	// Root
+	mux.HandleFunc("/", p.handleRoot)
+
+	return mux
+}
+
+func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		p.writeError(w, http.StatusNotFound, "not_found", "Endpoint not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"name":    "MindBalancer",
+		"version": "1.0.0",
+		"status":  "running",
+	})
+}
+
+func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "healthy",
+	})
+}
+
+func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		p.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+		return
+	}
+
+	ctx := r.Context()
+	requestID := uuid.New().String()
+	startTime := time.Now()
+
+	// Parse request
+	var req openai.ChatCompletionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, p.config.MaxRequestBodySize)).Decode(&req); err != nil {
+		p.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request: "+err.Error())
+		return
+	}
+
+	// Get username from auth header
+	username := p.extractUsername(r)
+
+	// Extract prompt for routing
+	var promptText string
+	if len(req.Messages) > 0 {
+		if content, ok := req.Messages[len(req.Messages)-1].Content.(string); ok {
+			promptText = content
+		}
+	}
+
+	// Route the request
+	hostgroup, _ := p.router.RouteRequest(req.Model, promptText, username, 0)
+
+	// Select a server
+	server, err := p.balancer.SelectServer(ctx, hostgroup)
+	if err != nil {
+		p.writeError(w, http.StatusServiceUnavailable, "no_servers", "No servers available: "+err.Error())
+		return
+	}
+
+	// Create provider
+	prov := provider.New(*server, p.config.RequestTimeout())
+
+	// Handle streaming vs non-streaming
+	if req.Stream {
+		p.handleStreamingChat(ctx, w, &req, prov, server, requestID, username, startTime)
+	} else {
+		p.handleNonStreamingChat(ctx, w, &req, prov, server, requestID, username, startTime)
+	}
+}
+
+func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, requestID, username string, startTime time.Time) {
+	resp, err := prov.ChatCompletion(ctx, req)
+
+	latency := time.Since(startTime)
+	success := err == nil
+
+	// Release server back to pool
+	p.balancer.ReleaseServer(server.Name, latency, success)
+
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if provErr, ok := err.(*provider.ProviderError); ok {
+			statusCode = provErr.StatusCode
+		}
+		p.writeError(w, statusCode, "provider_error", err.Error())
+		p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", 0, 0, latency, 0, statusCode, err.Error(), false)
+		return
+	}
+
+	// Record metrics
+	var promptTokens, outputTokens int
+	if resp.Usage != nil {
+		promptTokens = resp.Usage.PromptTokens
+		outputTokens = resp.Usage.CompletionTokens
+	}
+
+	p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
+
+	if p.metrics != nil {
+		p.metrics.RecordRequest(server.Name, req.Model, true, latency, promptTokens, outputTokens)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (p *Proxy) handleStreamingChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, requestID, username string, startTime time.Time) {
+	stream, err := prov.ChatCompletionStream(ctx, req)
+	if err != nil {
+		p.balancer.ReleaseServer(server.Name, time.Since(startTime), false)
+		statusCode := http.StatusInternalServerError
+		if provErr, ok := err.(*provider.ProviderError); ok {
+			statusCode = provErr.StatusCode
+		}
+		p.writeError(w, statusCode, "provider_error", err.Error())
+		return
+	}
+
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Request-ID", requestID)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.balancer.ReleaseServer(server.Name, time.Since(startTime), false)
+		p.writeError(w, http.StatusInternalServerError, "streaming_error", "Streaming not supported")
+		return
+	}
+
+	var firstByteTime time.Duration
+	firstByte := true
+
+	for event := range stream {
+		if event.Error != nil {
+			latency := time.Since(startTime)
+			p.balancer.ReleaseServer(server.Name, latency, false)
+			p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", 0, 0, latency, firstByteTime, http.StatusInternalServerError, event.Error.Error(), true)
+			return
+		}
+
+		if event.Done {
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			break
+		}
+
+		if firstByte {
+			firstByteTime = time.Since(startTime)
+			firstByte = false
+		}
+
+		fmt.Fprintf(w, "data: %s\n\n", string(event.Data))
+		flusher.Flush()
+	}
+
+	latency := time.Since(startTime)
+	p.balancer.ReleaseServer(server.Name, latency, true)
+	p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", 0, 0, latency, firstByteTime, http.StatusOK, "", true)
+
+	if p.metrics != nil {
+		p.metrics.RecordRequest(server.Name, req.Model, true, latency, 0, 0)
+	}
+}
+
+func (p *Proxy) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		p.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+		return
+	}
+
+	ctx := r.Context()
+	requestID := uuid.New().String()
+	startTime := time.Now()
+
+	var req openai.CompletionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, p.config.MaxRequestBodySize)).Decode(&req); err != nil {
+		p.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request: "+err.Error())
+		return
+	}
+
+	username := p.extractUsername(r)
+
+	var promptText string
+	switch v := req.Prompt.(type) {
+	case string:
+		promptText = v
+	case []string:
+		if len(v) > 0 {
+			promptText = v[0]
+		}
+	}
+
+	hostgroup, _ := p.router.RouteRequest(req.Model, promptText, username, 0)
+	server, err := p.balancer.SelectServer(ctx, hostgroup)
+	if err != nil {
+		p.writeError(w, http.StatusServiceUnavailable, "no_servers", "No servers available: "+err.Error())
+		return
+	}
+
+	prov := provider.New(*server, p.config.RequestTimeout())
+	resp, err := prov.Completion(ctx, &req)
+
+	latency := time.Since(startTime)
+	success := err == nil
+	p.balancer.ReleaseServer(server.Name, latency, success)
+
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if provErr, ok := err.(*provider.ProviderError); ok {
+			statusCode = provErr.StatusCode
+		}
+		p.writeError(w, statusCode, "provider_error", err.Error())
+		p.logRequest(requestID, username, server.Name, req.Model, "/v1/completions", 0, 0, latency, 0, statusCode, err.Error(), false)
+		return
+	}
+
+	var promptTokens, outputTokens int
+	if resp.Usage != nil {
+		promptTokens = resp.Usage.PromptTokens
+		outputTokens = resp.Usage.CompletionTokens
+	}
+
+	p.logRequest(requestID, username, server.Name, req.Model, "/v1/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
+
+	if p.metrics != nil {
+		p.metrics.RecordRequest(server.Name, req.Model, true, latency, promptTokens, outputTokens)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (p *Proxy) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		p.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is allowed")
+		return
+	}
+
+	ctx := r.Context()
+	requestID := uuid.New().String()
+	startTime := time.Now()
+
+	var req openai.EmbeddingRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, p.config.MaxRequestBodySize)).Decode(&req); err != nil {
+		p.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request: "+err.Error())
+		return
+	}
+
+	username := p.extractUsername(r)
+	hostgroup, _ := p.router.RouteRequest(req.Model, "", username, 0)
+	server, err := p.balancer.SelectServer(ctx, hostgroup)
+	if err != nil {
+		p.writeError(w, http.StatusServiceUnavailable, "no_servers", "No servers available: "+err.Error())
+		return
+	}
+
+	prov := provider.New(*server, p.config.RequestTimeout())
+	if !prov.SupportsEmbeddings() {
+		p.balancer.ReleaseServer(server.Name, 0, false)
+		p.writeError(w, http.StatusBadRequest, "unsupported", "Provider does not support embeddings")
+		return
+	}
+
+	resp, err := prov.Embedding(ctx, &req)
+
+	latency := time.Since(startTime)
+	success := err == nil
+	p.balancer.ReleaseServer(server.Name, latency, success)
+
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if provErr, ok := err.(*provider.ProviderError); ok {
+			statusCode = provErr.StatusCode
+		}
+		p.writeError(w, statusCode, "provider_error", err.Error())
+		p.logRequest(requestID, username, server.Name, req.Model, "/v1/embeddings", 0, 0, latency, 0, statusCode, err.Error(), false)
+		return
+	}
+
+	var tokens int
+	if resp.Usage != nil {
+		tokens = resp.Usage.TotalTokens
+	}
+
+	p.logRequest(requestID, username, server.Name, req.Model, "/v1/embeddings", tokens, 0, latency, 0, http.StatusOK, "", false)
+
+	if p.metrics != nil {
+		p.metrics.RecordRequest(server.Name, req.Model, true, latency, tokens, 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		p.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET is allowed")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Get all servers and aggregate models
+	servers, err := p.storage.GetServers(ctx, nil)
+	if err != nil {
+		p.writeError(w, http.StatusInternalServerError, "internal_error", "Failed to get servers")
+		return
+	}
+
+	allModels := make(map[string]openai.Model)
+
+	for _, srv := range servers {
+		if srv.Status != storage.ServerStatusOnline {
+			continue
+		}
+
+		prov := provider.New(srv, p.config.RequestTimeout())
+		models, err := prov.ListModels(ctx)
+		if err != nil {
+			continue
+		}
+
+		for _, m := range models.Data {
+			allModels[m.ID] = m
+		}
+	}
+
+	modelList := make([]openai.Model, 0, len(allModels))
+	for _, m := range allModels {
+		modelList = append(modelList, m)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(openai.ModelList{
+		Object: "list",
+		Data:   modelList,
+	})
+}
+
+func (p *Proxy) extractUsername(r *http.Request) string {
+	// Try to extract from Authorization header
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		// Could map API keys to usernames
+		return "default"
+	}
+
+	// Try X-User header
+	if user := r.Header.Get("X-User"); user != "" {
+		return user
+	}
+
+	return "anonymous"
+}
+
+func (p *Proxy) writeError(w http.ResponseWriter, statusCode int, errType, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(openai.ErrorResponse{
+		Error: &openai.APIError{
+			Message: message,
+			Type:    errType,
+		},
+	})
+}
+
+func (p *Proxy) logRequest(requestID, username, serverName, model, endpoint string, promptTokens, outputTokens int, latency, firstByte time.Duration, statusCode int, errorMsg string, streaming bool) {
+	log := &storage.RequestLog{
+		RequestID:    requestID,
+		Username:     username,
+		ServerName:   serverName,
+		Model:        model,
+		Endpoint:     endpoint,
+		PromptTokens: promptTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  promptTokens + outputTokens,
+		LatencyMS:    latency.Milliseconds(),
+		FirstByteMS:  firstByte.Milliseconds(),
+		StatusCode:   statusCode,
+		ErrorMessage: errorMsg,
+		Streaming:    streaming,
+		Timestamp:    time.Now(),
+	}
+
+	// Log asynchronously
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		p.storage.InsertRequestLog(ctx, log)
+	}()
+}

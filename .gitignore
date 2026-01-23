@@ -1,0 +1,55 @@
+# Binaries
+mindbalancer
+mindsql
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+/bin/
+/dist/
+/build/
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Config with secrets
+mindbalancer.cnf
+*.key
+*.pem
+*.crt
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
