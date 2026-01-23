@@ -8,8 +8,8 @@
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
-  <a href="#documentation">Documentation</a> •
-  <a href="#contributing">Contributing</a>
+  <a href="#web-dashboard">Web Dashboard</a> •
+  <a href="#mindsql-reference">mindsql CLI</a>
 </p>
 
 ---
@@ -35,7 +35,7 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 |-----------|----------------------|
 | Single point of failure with one AI provider | Automatic failover across multiple providers |
 | Vendor lock-in | Provider-agnostic API (OpenAI-compatible) |
-| No visibility into AI usage | Comprehensive metrics and query logging |
+| No visibility into AI usage | Comprehensive metrics, Web UI dashboard, and query logging |
 | Complex client-side load balancing | Centralized, weighted load distribution |
 | Managing multiple API keys | Single entry point with encrypted key storage |
 | Rate limit management | Built-in rate limiting per user/application |
@@ -63,10 +63,16 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 - **Sticky Sessions** — Maintain conversation context
 
 ### 📊 Observability
+- **Web UI Dashboard** — Real-time monitoring interface
 - **Real-time Metrics** — Prometheus-compatible metrics endpoint
 - **Query Logging** — Detailed request/response logging
 - **Statistics Tables** — SQL-queryable stats (ProxySQL-style)
 - **Grafana Dashboard** — Pre-built visualization
+
+### 🚦 Rate Limiting
+- **Per-user limits** — Control requests and tokens per minute
+- **Global limits** — Default limits for all users
+- **Rate limit headers** — `X-RateLimit-Remaining`, `X-RateLimit-Reset`
 
 ---
 
@@ -76,7 +82,7 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 
 ```bash
 # Clone the repository
-git clone https://github.com/mindbalancer/mindbalancer.git
+git clone https://github.com/mindbalancer/mindbalancer-labs.git
 cd mindbalancer
 
 # Build
@@ -97,35 +103,43 @@ go install github.com/mindbalancer/mindbalancer/cmd/mindsql@latest
 
 ## Quick Start
 
-### 1. Start MindBalancer
+### 1. Create Configuration
 
 ```bash
-./bin/mindbalancer
+cp configs/mindbalancer.example.cnf mindbalancer.cnf
+# Edit mindbalancer.cnf with your settings
+```
+
+### 2. Start MindBalancer
+
+```bash
+./bin/mindbalancer -config mindbalancer.cnf
 ```
 
 This starts:
-- **Proxy API** on port `6033` (OpenAI-compatible)
-- **Admin Interface** on port `6032` (MySQL protocol)
+- **Proxy API** on port `6034` (OpenAI-compatible)
+- **Admin HTTP API** on port `6033` (REST + Web Dashboard)
+- **Admin MySQL** on port `6032` (for mindsql CLI)
 - **Metrics** on port `9090` (Prometheus)
 
-### 2. Add Your First Server
+### 3. Add Your First Server
 
 Connect with mindsql:
 
 ```bash
-./bin/mindsql -h 127.0.0.1 -P 6032
+./bin/mindsql
 ```
 
 Add an OpenAI server:
 
 ```sql
-INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, weight)
-VALUES ('openai-1', 'openai', 'https://api.openai.com', 'sk-your-api-key', 5);
+INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight)
+VALUES ('openai-1', 'openai', 'https://api.openai.com', 'sk-your-api-key', 0, 5);
 
 LOAD AI SERVERS TO RUNTIME;
 ```
 
-### 3. Use the API
+### 4. Use the API
 
 Point your OpenAI SDK to MindBalancer:
 
@@ -133,7 +147,7 @@ Point your OpenAI SDK to MindBalancer:
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:6033/v1",
+    base_url="http://localhost:6034/v1",
     api_key="any-key"  # MindBalancer handles authentication
 )
 
@@ -143,6 +157,33 @@ response = client.chat.completions.create(
 )
 ```
 
+Or with curl:
+
+```bash
+curl -X POST http://localhost:6034/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+---
+
+## Web Dashboard
+
+MindBalancer includes a built-in web dashboard for real-time monitoring.
+
+**Access:** `http://localhost:6033/`
+
+### Features:
+- 📊 Server status and health monitoring
+- 📈 Request statistics and latency metrics
+- 🔄 Auto-refresh every 5 seconds
+- 🌙 Beautiful dark theme UI
+
+![Dashboard Preview](docs/dashboard-preview.png)
+
 ---
 
 ## Architecture
@@ -151,26 +192,24 @@ response = client.chat.completions.create(
 ┌────────────────────────────────────────────────────────────────────────┐
 │                            MindBalancer                                │
 │  ┌──────────────┐     ┌──────────────────────────────────────────┐    │
-│  │   mindsql    │────▶│            Admin Interface               │    │
-│  │     CLI      │     │         (MySQL Protocol :6032)           │    │
+│  │   mindsql    │────▶│      Admin Interface (MySQL :6032)       │    │
+│  │     CLI      │     │      HTTP API + Dashboard (:6033)        │    │
 │  └──────────────┘     └──────────────────────────────────────────┘    │
 │                                                                        │
 │  ┌─────────────────────────────────────────────────────────────────┐  │
 │  │                        Core Engine                               │  │
-│  │                                                                  │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │  │
 │  │  │   Config    │  │    Load     │  │      Health Check       │  │  │
 │  │  │   Manager   │  │  Balancer   │  │    & Circuit Breaker    │  │  │
 │  │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │  │
-│  │                                                                  │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │  │
-│  │  │   Query     │  │   Stats     │  │     Provider Pool       │  │  │
-│  │  │   Router    │  │  Collector  │  │   (Connection Mgmt)     │  │  │
+│  │  │   Query     │  │    Rate     │  │     Provider Pool       │  │  │
+│  │  │   Router    │  │   Limiter   │  │   (Connection Mgmt)     │  │  │
 │  │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
 │                                                                        │
 │  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │                OpenAI-Compatible API (:6033)                     │  │
+│  │                OpenAI-Compatible API (:6034)                     │  │
 │  │   POST /v1/chat/completions  |  POST /v1/embeddings             │  │
 │  │   POST /v1/completions       |  GET  /v1/models                 │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
@@ -190,10 +229,11 @@ response = client.chat.completions.create(
 ```ini
 [mindbalancer]
 # Network
-admin_bind_address = 0.0.0.0
+admin_bind_address = 127.0.0.1
 admin_port = 6032
-proxy_bind_address = 0.0.0.0
-proxy_port = 6033
+proxy_bind_address = 127.0.0.1
+proxy_port = 6034
+admin_http_port = 6033
 
 # Storage
 data_dir = /var/lib/mindbalancer
@@ -204,33 +244,38 @@ log_level = info    # debug, info, warn, error
 # Failover
 failover_enabled = true
 max_retries = 3
-circuit_breaker_threshold = 3
+circuit_breaker_threshold = 5
 
 # Health Check
 health_check_interval_ms = 5000
+
+# Rate Limiting
+rate_limit_enabled = true
+default_requests_per_minute = 1000
+default_tokens_per_minute = 100000
 
 # Metrics
 prometheus_enabled = true
 prometheus_port = 9090
 ```
 
-### Runtime Configuration via mindsql
-
-```sql
--- View all variables
-SELECT * FROM global_variables;
-
--- Change settings
-SET ai-max-retries = 5;
-SET ai-health-check-interval = 10000;
-
--- Apply changes
-LOAD VARIABLES TO RUNTIME;
-```
+See `configs/mindbalancer.example.cnf` for all options.
 
 ---
 
 ## mindsql Reference
+
+mindsql is a MySQL-compatible CLI for managing MindBalancer.
+
+### Features
+
+| Key | Function |
+|-----|----------|
+| ↑ / ↓ | Navigate command history |
+| Tab | Auto-complete commands |
+| Ctrl+C | Cancel current input |
+
+History is saved to `~/.mindsql_history`
 
 ### Server Management
 
@@ -238,64 +283,57 @@ LOAD VARIABLES TO RUNTIME;
 -- List servers
 SELECT * FROM ai_servers;
 
+-- Show API keys (masked)
+SHOW API KEYS;
+
+-- Show health status
+SHOW HEALTH STATUS;
+
 -- Add server
-INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, weight)
-VALUES ('server-name', 'openai', 'https://api.openai.com', 'sk-xxx', 5);
-
--- Update weight (shift traffic)
-UPDATE ai_servers SET weight = 10 WHERE name = 'server-name';
-
--- Disable server
-UPDATE ai_servers SET status = 'OFFLINE' WHERE name = 'server-name';
+INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight)
+VALUES ('openai-1', 'openai', 'https://api.openai.com', 'sk-xxx', 0, 5);
 
 -- Remove server
-DELETE FROM ai_servers WHERE name = 'server-name';
+DELETE FROM ai_servers WHERE name = 'openai-1';
 
 -- Apply changes
 LOAD AI SERVERS TO RUNTIME;
 ```
 
-### User Management
-
-```sql
--- List users
-SELECT * FROM ai_users;
-
--- Add user with rate limits
-INSERT INTO ai_users (username, password_hash, max_requests_per_minute, max_tokens_per_minute)
-VALUES ('app-name', SHA256('password'), 100, 100000);
-
--- Update limits
-UPDATE ai_users SET max_requests_per_minute = 200 WHERE username = 'app-name';
-
-LOAD AI USERS TO RUNTIME;
-```
-
 ### Routing Rules
 
 ```sql
--- Route specific models
-INSERT INTO ai_routing_rules (match_model, destination_hostgroup)
-VALUES ('gpt-4*', 1);
+-- List rules
+SELECT * FROM ai_routing_rules;
 
--- Route by prompt pattern
-INSERT INTO ai_routing_rules (match_pattern, destination_hostgroup, priority)
-VALUES ('^(code|program|debug)', 1, 50);
+-- Route GPT models to hostgroup 0
+INSERT INTO ai_routing_rules (match_model, destination_hostgroup, priority)
+VALUES ('gpt-*', 0, 10);
+
+-- Route Claude models to hostgroup 1
+INSERT INTO ai_routing_rules (match_model, destination_hostgroup, priority)
+VALUES ('claude-*', 1, 10);
 
 LOAD AI ROUTING RULES TO RUNTIME;
 ```
 
-### Statistics
+### Statistics & Monitoring
 
 ```sql
 -- Server stats
 SELECT * FROM stats_ai_servers;
 
 -- Recent requests
-SELECT * FROM stats_ai_requests ORDER BY timestamp DESC LIMIT 20;
+SELECT * FROM stats_ai_requests;
 
 -- Connection pool status
-SELECT * FROM runtime_ai_servers;
+SHOW PROCESSLIST;
+
+-- Summary
+SHOW STATS;
+
+-- Hostgroup overview
+SHOW HOSTGROUPS;
 ```
 
 ### Admin Commands
@@ -304,9 +342,42 @@ SELECT * FROM runtime_ai_servers;
 SHOW PROCESSLIST;           -- Active requests
 SHOW STATS;                 -- Summary statistics  
 SHOW HOSTGROUPS;            -- Hostgroup overview
-KILL CONNECTION <id>;       -- Terminate request
-FLUSH LOGS;                 -- Rotate log files
-SHUTDOWN;                   -- Graceful shutdown
+SHOW API KEYS;              -- API keys (masked)
+SHOW HEALTH STATUS;         -- Server health
+```
+
+---
+
+## HTTP Admin API
+
+### Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/servers` | List all servers |
+| POST | `/api/servers` | Add a server |
+| DELETE | `/api/servers/{name}` | Remove a server |
+| GET | `/api/stats` | Get statistics |
+| GET | `/api/health` | Health status |
+| POST | `/api/reload` | Reload configuration |
+| GET | `/` | Web Dashboard |
+
+### Example: Add Server via API
+
+```bash
+curl -X POST http://localhost:6033/api/servers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-backup",
+    "provider_type": "openai",
+    "endpoint": "https://api.openai.com",
+    "api_key_encrypted": "sk-your-key",
+    "hostgroup": 0,
+    "weight": 3
+  }'
+
+# Reload to apply
+curl -X POST http://localhost:6033/api/reload
 ```
 
 ---
@@ -315,8 +386,8 @@ SHUTDOWN;                   -- Graceful shutdown
 
 | Provider | Status | Streaming | Embeddings | Notes |
 |----------|--------|-----------|------------|-------|
-| OpenAI | ✅ Full | ✅ | ✅ | GPT-3.5, GPT-4, etc. |
-| Anthropic | ✅ Full | ✅ | ❌ | Claude models |
+| OpenAI | ✅ Full | ✅ | ✅ | GPT-3.5, GPT-4, GPT-4o |
+| Anthropic | ✅ Full | ✅ | ❌ | Claude 3, Claude 3.5 |
 | Ollama | ✅ Full | ✅ | ✅ | Local models |
 | Azure OpenAI | ✅ Full | ✅ | ✅ | Enterprise Azure |
 | Groq | ✅ Full | ✅ | ❌ | Fast inference |
@@ -342,14 +413,13 @@ mindbalancer_tokens_total{server="openai-1", direction="input"} 5420000
 mindbalancer_server_status{server="openai-1"} 1
 mindbalancer_circuit_breaker_state{server="openai-1"} 0
 
-# Connection pool
-mindbalancer_connections_active{server="openai-1"} 45
-mindbalancer_connections_idle{server="openai-1"} 55
+# Rate limiting
+mindbalancer_rate_limit_remaining{user="default"} 950
 ```
 
 ### Grafana Dashboard
 
-Import our pre-built dashboard from `grafana/mindbalancer-dashboard.json`
+Import the pre-built dashboard from `grafana/mindbalancer-dashboard.json`
 
 ---
 
@@ -358,11 +428,12 @@ Import our pre-built dashboard from `grafana/mindbalancer-dashboard.json`
 - [x] Core load balancing (weighted round-robin)
 - [x] OpenAI-compatible API
 - [x] SQLite storage with ProxySQL-style tables
-- [x] mindsql CLI
+- [x] mindsql CLI with readline support
 - [x] Health checks and failover
+- [x] Rate limiting
+- [x] Web UI Dashboard
 - [ ] Response caching
 - [ ] Semantic caching (embedding-based)
-- [ ] Web UI dashboard
 - [ ] Cluster mode (multi-node)
 - [ ] Request queuing
 - [ ] Cost tracking and budgets
@@ -375,27 +446,17 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 
 ```bash
 # Development setup
-git clone https://github.com/mindbalancer/mindbalancer.git
+git clone https://github.com/mindbalancer/mindbalancer-labs.git
 cd mindbalancer
-make dev-setup
+make build
 make test
-make run
 ```
 
 ---
 
 ## License
 
-Apache License 2.0 — See [LICENSE](LICENSE) for details.
-
----
-
-## Support
-
-- 📖 [Documentation](https://docs.mindbalancer.io)
-- 💬 [Discord Community](https://discord.gg/mindbalancer)
-- 🐛 [Issue Tracker](https://github.com/mindbalancer/mindbalancer/issues)
-- 📧 [Email](mailto:support@mindbalancer.io)
+MIT License — See [LICENSE](LICENSE) for details.
 
 ---
 
