@@ -78,26 +78,29 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 
 ## Installation
 
+### Requirements
+
+- **Go 1.20+** ([download](https://go.dev/dl/))
+- **Make** (usually pre-installed on macOS/Linux)
+
 ### From Source
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/mindbalancer/mindbalancer-labs.git
 cd mindbalancer
 
-# Build
+# 2. Build binaries
 make build
 
-# Install (optional)
-sudo make install
+# 3. Verify installation
+./bin/mindbalancer -version
+./bin/mindsql -version
 ```
 
-### Using Go
-
-```bash
-go install github.com/mindbalancer/mindbalancer/cmd/mindbalancer@latest
-go install github.com/mindbalancer/mindbalancer/cmd/mindsql@latest
-```
+This creates:
+- `./bin/mindbalancer` — Main server
+- `./bin/mindsql` — Admin CLI
 
 ---
 
@@ -106,8 +109,34 @@ go install github.com/mindbalancer/mindbalancer/cmd/mindsql@latest
 ### 1. Create Configuration
 
 ```bash
+# Copy example config
 cp configs/mindbalancer.example.cnf mindbalancer.cnf
-# Edit mindbalancer.cnf with your settings
+```
+
+Edit `mindbalancer.cnf` with minimum settings:
+
+```ini
+[mindbalancer]
+# Network - localhost only for development
+admin_bind_address = 127.0.0.1
+admin_port = 6032
+proxy_bind_address = 127.0.0.1
+proxy_port = 6034
+admin_http_port = 6033
+
+# Storage - use /tmp for quick testing (no sudo needed)
+data_dir = /tmp/mindbalancer
+
+# Logging
+log_level = info
+
+# Health Check
+health_check_enabled = true
+health_check_interval_ms = 5000
+
+# Metrics
+prometheus_enabled = true
+prometheus_port = 9090
 ```
 
 ### 2. Start MindBalancer
@@ -116,13 +145,28 @@ cp configs/mindbalancer.example.cnf mindbalancer.cnf
 ./bin/mindbalancer -config mindbalancer.cnf
 ```
 
-This starts:
-- **Proxy API** on port `6034` (OpenAI-compatible)
-- **Admin HTTP API** on port `6033` (REST + Web Dashboard)
-- **Admin MySQL** on port `6032` (for mindsql CLI)
-- **Metrics** on port `9090` (Prometheus)
+You should see:
+```
+Starting MindBalancer version=xxx admin_port=6032 proxy_port=6034
+Starting proxy server on 127.0.0.1:6034
+Starting admin HTTP server on 127.0.0.1:6033
+Starting admin MySQL server on 127.0.0.1:6032
+Starting metrics server on :9090
+```
 
-### 3. Add Your First Server
+**Services:**
+| Port | Service | Description |
+|------|---------|-------------|
+| 6034 | Proxy API | OpenAI-compatible endpoint |
+| 6033 | Admin HTTP | REST API + Web Dashboard |
+| 6032 | Admin MySQL | mindsql CLI connection |
+| 9090 | Metrics | Prometheus metrics |
+
+### 3. Open Web Dashboard
+
+Open in browser: **http://localhost:6033/**
+
+### 4. Add Your First Server
 
 Connect with mindsql:
 
@@ -133,10 +177,28 @@ Connect with mindsql:
 Add an OpenAI server:
 
 ```sql
+-- Add OpenAI
 INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight)
-VALUES ('openai-1', 'openai', 'https://api.openai.com', 'sk-your-api-key', 0, 5);
+VALUES ('openai-main', 'openai', 'https://api.openai.com', 'sk-proj-YOUR-API-KEY', 0, 5);
 
+-- Add Anthropic (optional)
+INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight)
+VALUES ('anthropic-main', 'anthropic', 'https://api.anthropic.com', 'sk-ant-YOUR-API-KEY', 1, 5);
+
+-- Add routing rules (route by model)
+INSERT INTO ai_routing_rules (match_model, destination_hostgroup, priority)
+VALUES ('gpt-*', 0, 10);
+
+INSERT INTO ai_routing_rules (match_model, destination_hostgroup, priority)
+VALUES ('claude-*', 1, 10);
+
+-- Apply changes
 LOAD AI SERVERS TO RUNTIME;
+LOAD AI ROUTING RULES TO RUNTIME;
+
+-- Verify
+SELECT * FROM ai_servers;
+SHOW HEALTH STATUS;
 ```
 
 ### 4. Use the API
