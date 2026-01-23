@@ -529,10 +529,18 @@ func (a *Admin) Execute(ctx context.Context, command string) (string, error) {
 		return a.executeShowStats()
 	case strings.HasPrefix(upper, "SHOW HOSTGROUPS"):
 		return a.executeShowHostgroups(ctx)
+	case strings.HasPrefix(upper, "SHOW API KEYS"):
+		return a.executeShowAPIKeys(ctx)
+	case strings.HasPrefix(upper, "SHOW HEALTH STATUS"):
+		return a.executeShowHealthStatus()
 	case strings.HasPrefix(upper, "LOAD AI SERVERS TO RUNTIME"):
 		return a.executeLoadServers(ctx)
 	case strings.HasPrefix(upper, "LOAD AI ROUTING RULES TO RUNTIME"):
 		return a.executeLoadRules(ctx)
+	case strings.HasPrefix(upper, "INSERT INTO AI_SERVERS"):
+		return a.executeInsertServer(ctx, command)
+	case strings.HasPrefix(upper, "DELETE FROM AI_SERVERS"):
+		return a.executeDeleteServer(ctx, command)
 	case strings.HasPrefix(upper, "SET "):
 		return a.executeSet(command)
 	default:
@@ -745,6 +753,185 @@ func (a *Admin) executeShowHostgroups(ctx context.Context) (string, error) {
 	sb.WriteString("+----------+---------------+-------------+\n")
 
 	return sb.String(), nil
+}
+
+func (a *Admin) executeShowAPIKeys(ctx context.Context) (string, error) {
+	servers, err := a.storage.GetServers(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	sb.WriteString("+-----------------+-------------+------------------------------------------+\n")
+	sb.WriteString("| name            | provider    | api_key (masked)                         |\n")
+	sb.WriteString("+-----------------+-------------+------------------------------------------+\n")
+
+	for _, srv := range servers {
+		maskedKey := maskAPIKey(srv.APIKeyEncrypted)
+		sb.WriteString(fmt.Sprintf("| %-15s | %-11s | %-40s |\n",
+			truncate(srv.Name, 15),
+			truncate(srv.ProviderType, 11),
+			truncate(maskedKey, 40)))
+	}
+	sb.WriteString("+-----------------+-------------+------------------------------------------+\n")
+	sb.WriteString(fmt.Sprintf("%d rows in set\n", len(servers)))
+
+	return sb.String(), nil
+}
+
+func (a *Admin) executeShowHealthStatus() (string, error) {
+	status := a.health.GetAllStatus()
+
+	var sb strings.Builder
+	sb.WriteString("+-----------------+----------+------------+\n")
+	sb.WriteString("| server          | healthy  | latency_ms |\n")
+	sb.WriteString("+-----------------+----------+------------+\n")
+
+	for name, s := range status {
+		healthy := "Yes"
+		if !s.Healthy {
+			healthy = "No"
+		}
+		latencyMs := s.Latency.Milliseconds()
+		sb.WriteString(fmt.Sprintf("| %-15s | %-8s | %10d |\n",
+			truncate(name, 15),
+			healthy,
+			latencyMs))
+	}
+	sb.WriteString("+-----------------+----------+------------+\n")
+	sb.WriteString(fmt.Sprintf("%d rows in set\n", len(status)))
+
+	return sb.String(), nil
+}
+
+func maskAPIKey(key string) string {
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
+}
+
+func (a *Admin) executeInsertServer(ctx context.Context, command string) (string, error) {
+	// Parse: INSERT INTO ai_servers (cols) VALUES (vals)
+	// Simple parser for: INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight) VALUES ('name', 'type', 'url', 'key', 0, 1)
+	
+	upper := strings.ToUpper(command)
+	valuesIdx := strings.Index(upper, "VALUES")
+	if valuesIdx == -1 {
+		return "", fmt.Errorf("invalid INSERT syntax: missing VALUES")
+	}
+
+	valuesPart := command[valuesIdx+6:]
+	valuesPart = strings.TrimSpace(valuesPart)
+	
+	// Remove parentheses
+	valuesPart = strings.TrimPrefix(valuesPart, "(")
+	valuesPart = strings.TrimSuffix(valuesPart, ")")
+	valuesPart = strings.TrimSuffix(valuesPart, ";")
+	valuesPart = strings.TrimSuffix(valuesPart, ")")
+
+	// Parse values
+	values := parseCSVValues(valuesPart)
+	if len(values) < 4 {
+		return "", fmt.Errorf("invalid INSERT: need at least name, provider_type, endpoint, api_key_encrypted")
+	}
+
+	srv := &storage.Server{
+		Name:            unquote(values[0]),
+		ProviderType:    unquote(values[1]),
+		Endpoint:        unquote(values[2]),
+		APIKeyEncrypted: unquote(values[3]),
+		Hostgroup:       0,
+		Weight:          1,
+		MaxConnections:  100,
+		Status:          storage.ServerStatusOnline,
+	}
+
+	if len(values) > 4 {
+		fmt.Sscanf(values[4], "%d", &srv.Hostgroup)
+	}
+	if len(values) > 5 {
+		fmt.Sscanf(values[5], "%d", &srv.Weight)
+	}
+
+	if err := a.storage.InsertServer(ctx, srv); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Query OK, 1 row affected (server '%s' added)\n", srv.Name), nil
+}
+
+func (a *Admin) executeDeleteServer(ctx context.Context, command string) (string, error) {
+	// Parse: DELETE FROM ai_servers WHERE name = 'xxx'
+	upper := strings.ToUpper(command)
+	whereIdx := strings.Index(upper, "WHERE")
+	if whereIdx == -1 {
+		return "", fmt.Errorf("invalid DELETE syntax: missing WHERE clause (required for safety)")
+	}
+
+	wherePart := command[whereIdx+5:]
+	wherePart = strings.TrimSpace(wherePart)
+	wherePart = strings.TrimSuffix(wherePart, ";")
+
+	// Parse: name = 'xxx'
+	if !strings.Contains(strings.ToUpper(wherePart), "NAME") {
+		return "", fmt.Errorf("DELETE only supports WHERE name = 'value'")
+	}
+
+	parts := strings.SplitN(wherePart, "=", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid WHERE clause")
+	}
+
+	name := strings.TrimSpace(parts[1])
+	name = unquote(name)
+
+	if err := a.storage.DeleteServer(ctx, name); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Query OK, 1 row affected (server '%s' deleted)\n", name), nil
+}
+
+func parseCSVValues(s string) []string {
+	var values []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := byte(0)
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		
+		if !inQuote && (c == '\'' || c == '"') {
+			inQuote = true
+			quoteChar = c
+			current.WriteByte(c)
+		} else if inQuote && c == quoteChar {
+			inQuote = false
+			current.WriteByte(c)
+		} else if !inQuote && c == ',' {
+			values = append(values, strings.TrimSpace(current.String()))
+			current.Reset()
+		} else {
+			current.WriteByte(c)
+		}
+	}
+	
+	if current.Len() > 0 {
+		values = append(values, strings.TrimSpace(current.String()))
+	}
+
+	return values
+}
+
+func unquote(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func (a *Admin) executeLoadServers(ctx context.Context) (string, error) {
