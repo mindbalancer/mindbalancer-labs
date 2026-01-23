@@ -53,6 +53,7 @@ func (a *Admin) Handler() http.Handler {
 
 	// Routing rules
 	mux.HandleFunc("/api/rules", a.handleRules)
+	mux.HandleFunc("/api/routing-rules", a.handleRules)
 
 	// Hostgroups
 	mux.HandleFunc("/api/hostgroups", a.handleHostgroups)
@@ -71,7 +72,33 @@ func (a *Admin) Handler() http.Handler {
 	// Operations
 	mux.HandleFunc("/api/reload", a.handleReload)
 
+	// Web UI Dashboard
+	mux.HandleFunc("/", a.handleDashboard)
+
 	return mux
+}
+
+// handleDashboard serves the web UI dashboard.
+func (a *Admin) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for API calls from dashboard
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// If it's an API path, return 404 (already handled by other handlers)
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		a.writeError(w, http.StatusNotFound, "Endpoint not found")
+		return
+	}
+
+	// Serve embedded dashboard HTML
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(dashboardHTML))
 }
 
 // Server handlers

@@ -30,48 +30,48 @@ const (
 
 // Server represents an AI server/provider.
 type Server struct {
-	ID              int64
-	Name            string
-	ProviderType    string // openai, anthropic, ollama, azure, groq, google, bedrock, custom
-	Endpoint        string
-	APIKeyEncrypted string
-	Hostgroup       int
-	Weight          int
-	MaxConnections  int
-	Status          ServerStatus
-	Comment         string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID              int64        `json:"id"`
+	Name            string       `json:"name"`
+	ProviderType    string       `json:"provider_type"` // openai, anthropic, ollama, azure, groq, google, bedrock, custom
+	Endpoint        string       `json:"endpoint"`
+	APIKeyEncrypted string       `json:"api_key_encrypted,omitempty"`
+	Hostgroup       int          `json:"hostgroup"`
+	Weight          int          `json:"weight"`
+	MaxConnections  int          `json:"max_connections"`
+	Status          ServerStatus `json:"status"`
+	Comment         string       `json:"comment,omitempty"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
 }
 
 // User represents an API user.
 type User struct {
-	ID                   int64
-	Username             string
-	PasswordHash         string
-	Active               bool
-	DefaultHostgroup     int
-	MaxRequestsPerMinute int
-	MaxTokensPerMinute   int
-	Comment              string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                   int64     `json:"id"`
+	Username             string    `json:"username"`
+	PasswordHash         string    `json:"password_hash,omitempty"`
+	Active               bool      `json:"active"`
+	DefaultHostgroup     int       `json:"default_hostgroup"`
+	MaxRequestsPerMinute int       `json:"max_requests_per_minute"`
+	MaxTokensPerMinute   int       `json:"max_tokens_per_minute"`
+	Comment              string    `json:"comment,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // RoutingRule represents a request routing rule.
 type RoutingRule struct {
-	ID                   int64
-	RuleID               int
-	Active               bool
-	MatchModel           string
-	MatchPattern         string
-	MatchUser            string
-	DestinationHostgroup int
-	MirrorHostgroup      *int
-	Priority             int
-	Comment              string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                   int64     `json:"id"`
+	RuleID               int       `json:"rule_id"`
+	Active               bool      `json:"active"`
+	MatchModel           string    `json:"match_model,omitempty"`
+	MatchPattern         string    `json:"match_pattern,omitempty"`
+	MatchUser            string    `json:"match_user,omitempty"`
+	DestinationHostgroup int       `json:"destination_hostgroup"`
+	MirrorHostgroup      *int      `json:"mirror_hostgroup,omitempty"`
+	Priority             int       `json:"priority"`
+	Comment              string    `json:"comment,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // Hostgroup represents a logical group of servers.

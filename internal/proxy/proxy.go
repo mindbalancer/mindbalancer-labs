@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,27 +18,30 @@ import (
 	"github.com/mindbalancer/mindbalancer/internal/config"
 	"github.com/mindbalancer/mindbalancer/internal/metrics"
 	"github.com/mindbalancer/mindbalancer/internal/provider"
+	"github.com/mindbalancer/mindbalancer/internal/ratelimit"
 	"github.com/mindbalancer/mindbalancer/internal/router"
 	"github.com/mindbalancer/mindbalancer/internal/storage"
 )
 
 // Proxy handles OpenAI-compatible API requests.
 type Proxy struct {
-	config   *config.Config
-	storage  *storage.Storage
-	balancer *balancer.Balancer
-	router   *router.Router
-	metrics  *metrics.Collector
+	config    *config.Config
+	storage   *storage.Storage
+	balancer  *balancer.Balancer
+	router    *router.Router
+	metrics   *metrics.Collector
+	ratelimit *ratelimit.Limiter
 }
 
 // NewProxy creates a new proxy.
-func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, rtr *router.Router, met *metrics.Collector) *Proxy {
+func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, rtr *router.Router, met *metrics.Collector, rl *ratelimit.Limiter) *Proxy {
 	return &Proxy{
-		config:   cfg,
-		storage:  store,
-		balancer: bal,
-		router:   rtr,
-		metrics:  met,
+		config:    cfg,
+		storage:   store,
+		balancer:  bal,
+		router:    rtr,
+		metrics:   met,
+		ratelimit: rl,
 	}
 }
 
@@ -92,15 +96,34 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestID := uuid.New().String()
 	startTime := time.Now()
 
+	// Get username from auth header
+	username := p.extractUsername(r)
+
+	// Check rate limit
+	if p.ratelimit != nil {
+		result, err := p.ratelimit.Allow(ctx, username)
+		if err != nil {
+			p.writeError(w, http.StatusInternalServerError, "rate_limit_error", "Failed to check rate limit")
+			return
+		}
+		if !result.Allowed {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
+			w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
+			p.writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", 
+				fmt.Sprintf("Rate limit exceeded. Retry after %v", result.RetryAfter.Round(time.Second)))
+			return
+		}
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(result.RemainingRequests))
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
+	}
+
 	// Parse request
 	var req openai.ChatCompletionRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, p.config.MaxRequestBodySize)).Decode(&req); err != nil {
 		p.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request: "+err.Error())
 		return
 	}
-
-	// Get username from auth header
-	username := p.extractUsername(r)
 
 	// Extract prompt for routing
 	var promptText string
@@ -155,6 +178,11 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 	if resp.Usage != nil {
 		promptTokens = resp.Usage.PromptTokens
 		outputTokens = resp.Usage.CompletionTokens
+	}
+
+	// Record token usage for rate limiting
+	if p.ratelimit != nil {
+		p.ratelimit.RecordTokens(username, promptTokens+outputTokens)
 	}
 
 	p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)

@@ -20,6 +20,7 @@ import (
 	"github.com/mindbalancer/mindbalancer/internal/health"
 	"github.com/mindbalancer/mindbalancer/internal/metrics"
 	"github.com/mindbalancer/mindbalancer/internal/proxy"
+	"github.com/mindbalancer/mindbalancer/internal/ratelimit"
 	"github.com/mindbalancer/mindbalancer/internal/router"
 	"github.com/mindbalancer/mindbalancer/internal/storage"
 	"github.com/mindbalancer/mindbalancer/pkg/protocol"
@@ -83,11 +84,19 @@ func main() {
 	// Initialize metrics collector
 	metricsCollector := metrics.NewCollector()
 
+	// Initialize rate limiter
+	rateLimiter := ratelimit.NewLimiter(
+		store,
+		cfg.RateLimitEnabled,
+		cfg.DefaultRequestsPerMinute,
+		cfg.DefaultTokensPerMinute,
+	)
+
 	// Initialize admin interface
 	adminHandler := admin.NewAdmin(cfg, store, bal, healthChecker, circuitMgr, rtr)
 
 	// Initialize proxy
-	proxyHandler := proxy.NewProxy(cfg, store, bal, rtr, metricsCollector)
+	proxyHandler := proxy.NewProxy(cfg, store, bal, rtr, metricsCollector, rateLimiter)
 
 	// Load initial data
 	ctx := context.Background()
@@ -100,6 +109,9 @@ func main() {
 
 	// Start health checker
 	healthChecker.Start(ctx)
+
+	// Start rate limiter cleanup
+	rateLimiter.StartCleanup(ctx)
 
 	// Create servers
 	proxyServer := &http.Server{
