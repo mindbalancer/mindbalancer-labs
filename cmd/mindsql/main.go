@@ -2,14 +2,15 @@
 package main
 
 import (
-	"bufio"
 	"database/sql"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/peterh/liner"
 )
 
 var (
@@ -52,7 +53,7 @@ func main() {
 		return
 	}
 
-	// Interactive mode
+	// Interactive mode with readline support
 	runInteractive(db)
 }
 
@@ -179,35 +180,100 @@ func printRow(values []string, widths []int) {
 }
 
 func runInteractive(db *sql.DB) {
+	line := liner.NewLiner()
+	defer line.Close()
+
+	// Configure liner
+	line.SetCtrlCAborts(true)
+	line.SetMultiLineMode(true)
+
+	// History file
+	historyFile := getHistoryFile()
+	if f, err := os.Open(historyFile); err == nil {
+		line.ReadHistory(f)
+		f.Close()
+	}
+
+	// Save history on exit
+	defer func() {
+		if f, err := os.Create(historyFile); err == nil {
+			line.WriteHistory(f)
+			f.Close()
+		}
+	}()
+
+	// Auto-completion
+	line.SetCompleter(func(line string) []string {
+		commands := []string{
+			"SELECT * FROM ai_servers;",
+			"SELECT * FROM ai_users;",
+			"SELECT * FROM ai_routing_rules;",
+			"SELECT * FROM global_variables;",
+			"SELECT * FROM stats_ai_servers;",
+			"SELECT * FROM stats_ai_requests;",
+			"SHOW PROCESSLIST;",
+			"SHOW STATS;",
+			"SHOW HOSTGROUPS;",
+			"SHOW API KEYS;",
+			"SHOW HEALTH STATUS;",
+			"LOAD AI SERVERS TO RUNTIME;",
+			"LOAD AI ROUTING RULES TO RUNTIME;",
+			"INSERT INTO ai_servers",
+			"DELETE FROM ai_servers WHERE name = ",
+			"quit",
+			"help",
+		}
+
+		var completions []string
+		lower := strings.ToLower(line)
+		for _, cmd := range commands {
+			if strings.HasPrefix(strings.ToLower(cmd), lower) {
+				completions = append(completions, cmd)
+			}
+		}
+		return completions
+	})
+
 	fmt.Println("Welcome to mindsql - MindBalancer Admin CLI")
 	fmt.Println("Type 'help' for available commands, 'quit' to exit.")
 	fmt.Println()
 
-	reader := bufio.NewReader(os.Stdin)
 	var commandBuffer strings.Builder
 
 	for {
-		if commandBuffer.Len() == 0 {
-			fmt.Print("mindsql> ")
-		} else {
-			fmt.Print("      -> ")
+		prompt := "mindsql> "
+		if commandBuffer.Len() > 0 {
+			prompt = "      -> "
 		}
 
-		line, err := reader.ReadString('\n')
+		input, err := line.Prompt(prompt)
 		if err != nil {
+			if err == liner.ErrPromptAborted {
+				if commandBuffer.Len() > 0 {
+					commandBuffer.Reset()
+					fmt.Println()
+					continue
+				}
+				fmt.Println("Bye")
+				break
+			}
 			break
 		}
 
-		line = strings.TrimSpace(line)
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
 
 		// Handle special commands
-		upper := strings.ToUpper(line)
+		upper := strings.ToUpper(input)
 		if upper == "QUIT" || upper == "EXIT" || upper == "\\Q" {
 			fmt.Println("Bye")
 			break
 		}
 		if upper == "HELP" || upper == "\\H" {
 			printHelp()
+			line.AppendHistory(input)
 			continue
 		}
 		if upper == "CLEAR" || upper == "\\C" {
@@ -216,6 +282,7 @@ func runInteractive(db *sql.DB) {
 		}
 		if upper == "STATUS" || upper == "\\S" {
 			printStatus(db)
+			line.AppendHistory(input)
 			continue
 		}
 
@@ -223,17 +290,25 @@ func runInteractive(db *sql.DB) {
 		if commandBuffer.Len() > 0 {
 			commandBuffer.WriteString(" ")
 		}
-		commandBuffer.WriteString(line)
+		commandBuffer.WriteString(input)
 
 		// Check if command is complete (ends with ; or is a special command)
 		cmd := commandBuffer.String()
 		if strings.HasSuffix(cmd, ";") || isSpecialCommand(cmd) {
 			cmd = strings.TrimSuffix(cmd, ";")
+			line.AppendHistory(commandBuffer.String())
 			executeCommand(db, cmd)
 			commandBuffer.Reset()
 		}
 	}
+}
 
+func getHistoryFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".mindsql_history"
+	}
+	return filepath.Join(home, ".mindsql_history")
 }
 
 func isSpecialCommand(cmd string) bool {
@@ -242,6 +317,8 @@ func isSpecialCommand(cmd string) bool {
 		"SHOW PROCESSLIST",
 		"SHOW STATS",
 		"SHOW HOSTGROUPS",
+		"SHOW API KEYS",
+		"SHOW HEALTH STATUS",
 		"SHUTDOWN",
 		"FLUSH LOGS",
 	}
@@ -260,47 +337,40 @@ MindBalancer Admin Commands
 
 Server Management:
   SELECT * FROM ai_servers;           - List all servers
-  INSERT INTO ai_servers ...          - Add a server
-  UPDATE ai_servers SET ...           - Update a server
-  DELETE FROM ai_servers WHERE ...    - Remove a server
+  INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight)
+    VALUES ('name', 'openai', 'https://...', 'sk-xxx', 0, 1);
+  DELETE FROM ai_servers WHERE name = 'xxx';
   LOAD AI SERVERS TO RUNTIME;         - Apply server changes
 
 User Management:
   SELECT * FROM ai_users;             - List all users
-  INSERT INTO ai_users ...            - Add a user
-  UPDATE ai_users SET ...             - Update a user
-  DELETE FROM ai_users WHERE ...      - Remove a user
   LOAD AI USERS TO RUNTIME;           - Apply user changes
 
 Routing Rules:
   SELECT * FROM ai_routing_rules;     - List routing rules
-  INSERT INTO ai_routing_rules ...    - Add a rule
-  DELETE FROM ai_routing_rules ...    - Remove a rule
   LOAD AI ROUTING RULES TO RUNTIME;   - Apply rule changes
 
 Configuration:
   SELECT * FROM global_variables;     - Show all variables
   SET variable-name = value;          - Set a variable
-  LOAD VARIABLES TO RUNTIME;          - Apply variable changes
-  SAVE VARIABLES TO DISK;             - Persist variables
 
-Statistics:
+Statistics & Monitoring:
   SELECT * FROM stats_ai_servers;     - Server statistics
   SELECT * FROM stats_ai_requests;    - Recent requests
   SHOW PROCESSLIST;                   - Active connections
   SHOW STATS;                         - Summary statistics
   SHOW HOSTGROUPS;                    - Hostgroup overview
-
-Admin:
-  KILL CONNECTION <id>;               - Terminate a request
-  FLUSH LOGS;                         - Rotate log files
-  SHUTDOWN;                           - Graceful shutdown
+  SHOW API KEYS;                      - Show API keys (masked)
+  SHOW HEALTH STATUS;                 - Server health status
 
 Shortcuts:
-  \h, help     - Show this help
-  \q, quit     - Exit mindsql
-  \c, clear    - Clear current command
-  \s, status   - Show connection status
+  ↑/↓        - Navigate command history
+  Tab        - Auto-complete commands
+  Ctrl+C     - Cancel current input
+  \h, help   - Show this help
+  \q, quit   - Exit mindsql
+  \c, clear  - Clear current command
+  \s, status - Show connection status
 `)
 }
 
