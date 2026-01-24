@@ -49,3 +49,43 @@ response = client.chat.completions.create(
     max_tokens=100
 )
 print(response.choices[0].message.content)
+print()
+
+# Example 4: Referee Mode - Consensus-based response
+# Sends the same query to multiple AI providers and synthesizes the best answer
+print("=== Referee Mode (Consensus) ===")
+print("Querying multiple AI providers for consensus...")
+import requests
+import json
+
+referee_response = requests.post(
+    "http://localhost:6034/v1/chat/completions",
+    headers={"Content-Type": "application/json"},
+    json={
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": "What are the key differences between REST and GraphQL APIs?"}
+        ],
+        "max_tokens": 500,
+        "referee_mode": {
+            "enabled": True,
+            "referee_model": "gpt-4o",  # Model used to synthesize responses
+            "providers": ["openai", "anthropic"],  # Providers to query
+            "min_responses": 2  # Minimum successful responses required
+        }
+    }
+)
+
+if referee_response.status_code == 200:
+    data = referee_response.json()
+    print(f"Synthesized Answer: {data['choices'][0]['message']['content'][:300]}...")
+    if 'referee_info' in data:
+        info = data['referee_info']
+        print(f"\nReferee Info:")
+        print(f"  - Providers queried: {info['providers_queried']}")
+        print(f"  - Successful responses: {info['successful_responses']}")
+        print(f"  - Synthesis latency: {info['synthesis_latency_ms']}ms")
+        if info.get('failed_providers'):
+            print(f"  - Failed providers: {info['failed_providers']}")
+else:
+    print(f"Error: {referee_response.status_code} - {referee_response.text}")

@@ -80,6 +80,13 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 - **Global limits** — Default limits for all users
 - **Rate limit headers** — `X-RateLimit-Remaining`, `X-RateLimit-Reset`
 
+### 🏆 Referee Mode (Consensus-based Responses)
+- **Multi-provider queries** — Send the same request to multiple AI providers in parallel
+- **Intelligent synthesis** — A referee model analyzes all responses and creates the best answer
+- **Configurable consensus** — Set minimum successful responses required
+- **Reduced hallucination** — Cross-validate answers from different AI models
+- **Ideal for critical decisions** — Financial, medical, legal, or high-stakes content
+
 ### 💾 Response Caching
 - **Automatic caching** — Cache deterministic requests (temperature=0)
 - **LRU eviction** — Least Recently Used cache management
@@ -563,6 +570,78 @@ Import the pre-built dashboard from `grafana/mindbalancer-dashboard.json`
 
 ---
 
+## Referee Mode
+
+Referee Mode is a powerful feature that sends the same request to multiple AI providers in parallel, then uses a "referee" model to synthesize the best possible answer from all responses.
+
+### When to Use Referee Mode
+
+- **Critical decisions** requiring maximum accuracy
+- **Reducing hallucination risk** through cross-validation
+- **Complex technical questions** where different models may have different strengths
+- **High-stakes content** (financial, medical, legal advice)
+
+### Usage
+
+```bash
+curl -X POST http://localhost:6034/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Explain the CAP theorem"}],
+    "referee_mode": {
+      "enabled": true,
+      "referee_model": "gpt-4o",
+      "providers": ["openai", "anthropic", "google"],
+      "min_responses": 2
+    }
+  }'
+```
+
+### Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `enabled` | Enable referee mode | `false` |
+| `referee_model` | Model to synthesize responses | `gpt-4o` |
+| `providers` | Provider types to query (empty = all) | All available |
+| `min_responses` | Minimum successful responses required | `2` |
+| `timeout_ms` | Per-provider timeout in ms | `60000` |
+
+### Response
+
+The response includes a `referee_info` object:
+
+```json
+{
+  "choices": [{"message": {"content": "Synthesized answer..."}}],
+  "referee_info": {
+    "providers_queried": 3,
+    "successful_responses": 3,
+    "failed_providers": [],
+    "referee_model": "gpt-4o",
+    "synthesis_latency_ms": 2345
+  }
+}
+```
+
+### Configuration
+
+In `mindbalancer.cnf`:
+
+```ini
+# Referee Mode
+referee_enabled = true
+referee_min_responses = 2
+referee_timeout_ms = 60000
+referee_max_providers = 4
+referee_default_model = gpt-4o
+```
+
+> **Note:** Referee mode does not support streaming. Cost is approximately 4-5x a normal request (multiple providers + referee synthesis).
+
+---
+
 ## Roadmap
 
 - [x] Core load balancing (weighted round-robin)
@@ -579,6 +658,7 @@ Import the pre-built dashboard from `grafana/mindbalancer-dashboard.json`
 - [x] Connection pooling
 - [x] Graceful shutdown
 - [x] Hot config reload (SIGHUP)
+- [x] Referee Mode (consensus-based multi-provider responses)
 - [ ] Semantic caching (embedding-based)
 - [ ] Cluster mode (multi-node)
 - [ ] Request queuing

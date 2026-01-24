@@ -46,6 +46,12 @@ type Collector struct {
 	cacheItemCount      prometheus.Gauge
 	cacheCompressionSaved prometheus.Counter
 
+	// Referee mode metrics
+	refereeRequestsTotal     *prometheus.CounterVec
+	refereeRequestDuration   prometheus.Histogram
+	refereeProvidersQueried  prometheus.Histogram
+	refereeSuccessfulResponses prometheus.Histogram
+
 	registry *prometheus.Registry
 
 	// Model pricing (USD per 1K tokens)
@@ -152,6 +158,36 @@ func NewCollector() *Collector {
 		},
 	)
 
+	// Referee mode metrics
+	c.refereeRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_referee_requests_total",
+			Help: "Total number of referee mode requests",
+		},
+		[]string{"status"},
+	)
+	c.refereeRequestDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "mindbalancer_referee_request_duration_seconds",
+			Help:    "Referee mode request duration in seconds",
+			Buckets: []float64{1, 2.5, 5, 10, 20, 30, 60, 120, 180},
+		},
+	)
+	c.refereeProvidersQueried = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "mindbalancer_referee_providers_queried",
+			Help:    "Number of providers queried in referee mode",
+			Buckets: []float64{1, 2, 3, 4, 5, 6},
+		},
+	)
+	c.refereeSuccessfulResponses = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "mindbalancer_referee_successful_responses",
+			Help:    "Number of successful provider responses in referee mode",
+			Buckets: []float64{0, 1, 2, 3, 4, 5, 6},
+		},
+	)
+
 	// Initialize pricing (USD per 1K tokens) - Updated Jan 2025
 	c.pricing = map[string]ModelPricing{
 		// OpenAI
@@ -250,6 +286,10 @@ func NewCollector() *Collector {
 		c.connectionsActive,
 		c.connectionsIdle,
 		c.errorsTotal,
+		c.refereeRequestsTotal,
+		c.refereeRequestDuration,
+		c.refereeProvidersQueried,
+		c.refereeSuccessfulResponses,
 	)
 
 	// Register default Go metrics
@@ -436,6 +476,18 @@ func (c *Collector) AddCompressionSaved(bytes int64) {
 func (c *Collector) UpdateCacheStats(memoryUsed int64, itemCount int, evictions int64, compressionSaved int64) {
 	c.cacheMemoryBytes.Set(float64(memoryUsed))
 	c.cacheItemCount.Set(float64(itemCount))
+}
+
+// RecordRefereeRequest records metrics for a referee mode request.
+func (c *Collector) RecordRefereeRequest(success bool, duration time.Duration, providersQueried, successfulResponses int) {
+	status := "success"
+	if !success {
+		status = "error"
+	}
+	c.refereeRequestsTotal.WithLabelValues(status).Inc()
+	c.refereeRequestDuration.Observe(duration.Seconds())
+	c.refereeProvidersQueried.Observe(float64(providersQueried))
+	c.refereeSuccessfulResponses.Observe(float64(successfulResponses))
 }
 
 // CostSummary holds cost summary information.

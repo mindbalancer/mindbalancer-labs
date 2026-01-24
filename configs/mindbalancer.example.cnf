@@ -83,3 +83,14 @@ cache_ttl_seconds = 300                # Default TTL (5 minutes for chat)
 cache_max_item_size_kb = 2048          # Maximum single item size (2MB)
 cache_compression_enabled = true       # Compress responses > 1KB
 cache_embeddings_ttl_hours = 24        # Embeddings TTL (24 hours, deterministic)
+
+# Referee Mode Configuration
+# Referee mode sends the same request to multiple AI providers in parallel,
+# then uses a "referee" model to synthesize the best answer from all responses.
+# This is ideal for critical decisions, reducing hallucination risk, and
+# getting consensus on complex topics.
+referee_enabled = true                 # Enable referee mode globally
+referee_min_responses = 2              # Minimum successful responses required
+referee_timeout_ms = 60000             # Per-provider timeout (60 seconds)
+referee_max_providers = 4              # Maximum providers to query
+referee_default_model = gpt-4o         # Default model for synthesis

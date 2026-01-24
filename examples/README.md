@@ -63,3 +63,56 @@ MindBalancer handles:
 - ✅ Model-based routing (gpt-* → OpenAI, claude-* → Anthropic)
 - ✅ Rate limiting
 - ✅ Metrics and monitoring
+- ✅ **Referee Mode** - Consensus-based responses from multiple AI providers
+
+## Referee Mode
+
+Referee Mode sends the same query to multiple AI providers in parallel, then uses a "referee" model to synthesize the best answer from all responses. This is ideal for:
+
+- Critical decisions requiring high accuracy
+- Reducing hallucination risk
+- Getting consensus on complex topics
+
+### Example (curl)
+
+```bash
+curl -X POST "http://localhost:6034/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What is the CAP theorem?"}],
+    "referee_mode": {
+      "enabled": true,
+      "referee_model": "gpt-4o",
+      "providers": ["openai", "anthropic", "google"],
+      "min_responses": 2
+    }
+  }'
+```
+
+### Referee Mode Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `enabled` | Enable referee mode | `false` |
+| `referee_model` | Model to synthesize responses | Config default |
+| `providers` | Provider types to query (empty = all) | All available |
+| `min_responses` | Minimum successful responses | `2` |
+| `timeout_ms` | Per-provider timeout | Config default |
+
+### Response
+
+The response includes a `referee_info` object with metadata:
+
+```json
+{
+  "choices": [...],
+  "referee_info": {
+    "providers_queried": 3,
+    "successful_responses": 3,
+    "failed_providers": [],
+    "referee_model": "gpt-4o",
+    "synthesis_latency_ms": 2345
+  }
+}
+```

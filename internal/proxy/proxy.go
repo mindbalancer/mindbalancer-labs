@@ -21,6 +21,7 @@ import (
 	"github.com/mindbalancer/mindbalancer/internal/metrics"
 	"github.com/mindbalancer/mindbalancer/internal/provider"
 	"github.com/mindbalancer/mindbalancer/internal/ratelimit"
+	"github.com/mindbalancer/mindbalancer/internal/referee"
 	"github.com/mindbalancer/mindbalancer/internal/retry"
 	"github.com/mindbalancer/mindbalancer/internal/router"
 	"github.com/mindbalancer/mindbalancer/internal/storage"
@@ -35,6 +36,7 @@ type Proxy struct {
 	metrics   *metrics.Collector
 	ratelimit *ratelimit.Limiter
 	cache     *cache.Cache
+	referee   *referee.Engine
 }
 
 // NewProxy creates a new proxy.
@@ -54,6 +56,9 @@ func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer
 		EmbeddingsTTL:      cacheCfg.EmbeddingsTTL,
 	})
 
+	// Initialize referee engine
+	refereeEngine := referee.NewEngine(cfg, store, bal)
+
 	return &Proxy{
 		config:    cfg,
 		storage:   store,
@@ -62,6 +67,7 @@ func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer
 		metrics:   met,
 		ratelimit: rl,
 		cache:     cacheInstance,
+		referee:   refereeEngine,
 	}
 }
 
@@ -147,6 +153,16 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req openai.ChatCompletionRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, p.config.MaxRequestBodySize)).Decode(&req); err != nil {
 		p.writeError(w, http.StatusBadRequest, "invalid_request", "Failed to parse request: "+err.Error())
+		return
+	}
+
+	// Check for referee mode
+	if req.RefereeMode != nil && req.RefereeMode.Enabled {
+		if !p.config.RefereeEnabled {
+			p.writeError(w, http.StatusBadRequest, "referee_disabled", "Referee mode is disabled on this server")
+			return
+		}
+		p.handleRefereeModeChat(ctx, w, &req, requestID, username, startTime)
 		return
 	}
 
@@ -424,6 +440,69 @@ func (p *Proxy) handleStreamingChat(ctx context.Context, w http.ResponseWriter, 
 	if p.metrics != nil {
 		p.metrics.RecordRequest(server.Name, req.Model, true, latency, 0, 0)
 	}
+}
+
+func (p *Proxy) handleRefereeModeChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, requestID, username string, startTime time.Time) {
+	// Referee mode doesn't support streaming
+	if req.Stream {
+		p.writeError(w, http.StatusBadRequest, "invalid_request", "Referee mode does not support streaming")
+		return
+	}
+
+	// Execute referee mode
+	resp, err := p.referee.Execute(ctx, req)
+
+	latency := time.Since(startTime)
+
+	if err != nil {
+		p.writeError(w, http.StatusInternalServerError, "referee_error", err.Error())
+		p.logRequest(requestID, username, "referee", req.Model, "/v1/chat/completions", 0, 0, latency, 0, http.StatusInternalServerError, err.Error(), false)
+
+		if p.metrics != nil {
+			p.metrics.RecordRefereeRequest(false, latency, 0, 0)
+		}
+		return
+	}
+
+	// Calculate tokens for metrics
+	var promptTokens, outputTokens int
+	if resp.Usage != nil {
+		promptTokens = resp.Usage.PromptTokens
+		outputTokens = resp.Usage.CompletionTokens
+	}
+
+	// Record token usage for rate limiting
+	if p.ratelimit != nil {
+		p.ratelimit.RecordTokens(username, promptTokens+outputTokens)
+	}
+
+	// Log the request
+	refereeModel := req.RefereeMode.RefereeModel
+	if refereeModel == "" {
+		refereeModel = p.config.RefereeDefaultModel
+	}
+	p.logRequest(requestID, username, "referee:"+refereeModel, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
+
+	// Record metrics
+	if p.metrics != nil {
+		providersQueried := 0
+		successfulResponses := 0
+		if resp.RefereeInfo != nil {
+			providersQueried = resp.RefereeInfo.ProvidersQueried
+			successfulResponses = resp.RefereeInfo.SuccessfulResponses
+		}
+		p.metrics.RecordRefereeRequest(true, latency, providersQueried, successfulResponses)
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	w.Header().Set("X-Referee-Mode", "true")
+	if resp.RefereeInfo != nil {
+		w.Header().Set("X-Referee-Providers-Queried", strconv.Itoa(resp.RefereeInfo.ProvidersQueried))
+		w.Header().Set("X-Referee-Successful-Responses", strconv.Itoa(resp.RefereeInfo.SuccessfulResponses))
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (p *Proxy) handleCompletions(w http.ResponseWriter, r *http.Request) {
