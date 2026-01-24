@@ -39,12 +39,19 @@ type Proxy struct {
 
 // NewProxy creates a new proxy.
 func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, rtr *router.Router, met *metrics.Collector, rl *ratelimit.Limiter) *Proxy {
-	// Initialize cache with default config
+	// Initialize cache from config
+	cacheCfg := cfg.GetCacheConfig()
 	cacheInstance := cache.NewCache(cache.Config{
-		Enabled:     true,
-		MaxSize:     1000,
-		TTL:         5 * time.Minute,
-		MaxItemSize: 1024 * 1024, // 1MB
+		Enabled:            cacheCfg.Enabled,
+		MaxSize:            cacheCfg.MaxSize,
+		MaxMemoryMB:        cacheCfg.MaxMemoryMB,
+		TTL:                cacheCfg.TTL,
+		MaxItemSize:        cacheCfg.MaxItemSize,
+		NumShards:          16,
+		CompressionEnabled: cacheCfg.CompressionEnabled,
+		CompressionMinSize: 1024, // 1KB
+		CleanupInterval:    time.Minute,
+		EmbeddingsTTL:      cacheCfg.EmbeddingsTTL,
 	})
 
 	return &Proxy{
@@ -180,13 +187,13 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 
 	if cacheable {
 		// Generate cache key from request
-		cacheKey = cache.GenerateKey(req.Model, req.Messages, req.Temperature, req.MaxTokens)
+		cacheKey = cache.GenerateChatKey(req.Model, req.Messages, req.Temperature, req.MaxTokens, "")
 
-		// Check cache
+		// Check cache first
 		if cachedData, found := p.cache.Get(cacheKey); found {
 			// Cache HIT!
 			latency := time.Since(startTime)
-			
+
 			// Record cache hit in metrics
 			if p.metrics != nil {
 				p.metrics.RecordCacheHit()
@@ -212,9 +219,59 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		}
 	}
 
+	// Use request deduplication for identical concurrent requests
+	dedupeKey := cacheKey
+	if dedupeKey == "" {
+		// Generate key even for non-cacheable requests for deduplication
+		dedupeKey = cache.GenerateChatKey(req.Model, req.Messages, req.Temperature, req.MaxTokens, "")
+	}
+
+	respBytes, err, wasDeduplicated := p.cache.DeduplicatedCall(dedupeKey, func() ([]byte, error) {
+		return p.executeChatCompletion(ctx, req, prov, server, username, startTime)
+	})
+
+	latency := time.Since(startTime)
+
+	if wasDeduplicated {
+		// This request was deduplicated - another identical request got the result
+		if p.metrics != nil {
+			p.metrics.RecordDeduplication()
+		}
+		p.logRequest(requestID, username, "dedupe", req.Model, "/v1/chat/completions", 0, 0, latency, 0, http.StatusOK, "deduplicated", false)
+
+		// Release server since we didn't use it
+		p.balancer.ReleaseServer(server.Name, 0, true)
+	}
+
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if provErr, ok := err.(*provider.ProviderError); ok {
+			statusCode = provErr.StatusCode
+		}
+		p.writeError(w, statusCode, "provider_error", err.Error())
+		return
+	}
+
+	// Store in cache if cacheable and not deduplicated (avoid double-caching)
+	if cacheable && cacheKey != "" && !wasDeduplicated {
+		p.cache.Set(cacheKey, respBytes, req.Model, "/v1/chat/completions")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-ID", requestID)
+	if wasDeduplicated {
+		w.Header().Set("X-Cache", "DEDUPE")
+	} else {
+		w.Header().Set("X-Cache", "MISS")
+	}
+	w.Write(respBytes)
+}
+
+// executeChatCompletion performs the actual LLM call with retry logic.
+func (p *Proxy) executeChatCompletion(ctx context.Context, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, username string, startTime time.Time) ([]byte, error) {
 	// Get model-specific timeout
 	timeout := p.config.GetModelTimeout(req.Model)
-	
+
 	// Configure retry with exponential backoff
 	retryCfg := retry.Config{
 		MaxRetries:   p.config.MaxRetries,
@@ -224,12 +281,9 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		Jitter:       0.1,
 	}
 
-	var resp *openai.ChatCompletionResponse
-	var lastErr error
 	var usedServer *storage.Server = server
 	var usedProv provider.Provider = prov
 	attemptCount := 0
-	_ = timeout // Used in retry loop
 
 	// Retry logic with failover to different servers
 	result := retry.Do(ctx, retryCfg, func(ctx context.Context, attempt int) (*openai.ChatCompletionResponse, error) {
@@ -238,7 +292,7 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		// On retry, try to get a different server
 		if attempt > 0 {
 			p.balancer.ReleaseServer(usedServer.Name, time.Since(startTime), false)
-			
+
 			// Extract prompt for routing
 			var promptText string
 			if len(req.Messages) > 0 {
@@ -247,7 +301,7 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 				}
 			}
 			hostgroup, _ := p.router.RouteRequest(req.Model, promptText, username, 0)
-			
+
 			newServer, err := p.balancer.SelectServer(ctx, hostgroup)
 			if err != nil {
 				return nil, retry.NewRetryableError(err, false) // No more servers, don't retry
@@ -270,8 +324,8 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		return response, nil
 	})
 
-	resp = result.Value
-	lastErr = result.Err
+	resp := result.Value
+	lastErr := result.Err
 	latency := time.Since(startTime)
 	success := lastErr == nil
 
@@ -279,13 +333,8 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 	p.balancer.ReleaseServer(usedServer.Name, latency, success)
 
 	if lastErr != nil {
-		statusCode := http.StatusInternalServerError
-		if provErr, ok := lastErr.(*provider.ProviderError); ok {
-			statusCode = provErr.StatusCode
-		}
-		p.writeError(w, statusCode, "provider_error", lastErr.Error())
-		p.logRequest(requestID, username, usedServer.Name, req.Model, "/v1/chat/completions", 0, 0, latency, 0, statusCode, fmt.Sprintf("after %d attempts: %s", attemptCount, lastErr.Error()), false)
-		return
+		p.logRequest("", username, usedServer.Name, req.Model, "/v1/chat/completions", 0, 0, latency, 0, http.StatusInternalServerError, fmt.Sprintf("after %d attempts: %s", attemptCount, lastErr.Error()), false)
+		return nil, lastErr
 	}
 
 	// Record metrics
@@ -300,7 +349,7 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		p.ratelimit.RecordTokens(username, promptTokens+outputTokens)
 	}
 
-	p.logRequest(requestID, username, usedServer.Name, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
+	p.logRequest("", username, usedServer.Name, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
 
 	if p.metrics != nil {
 		p.metrics.RecordRequest(usedServer.Name, req.Model, true, latency, promptTokens, outputTokens)
@@ -308,27 +357,13 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		p.metrics.RecordCost(usedServer.Name, req.Model, usedServer.ProviderType, promptTokens, outputTokens)
 	}
 
-	// Add retry info header if there were retries
-	if attemptCount > 1 {
-		w.Header().Set("X-Retry-Count", strconv.Itoa(attemptCount-1))
-	}
-
 	// Serialize response
 	respBytes, err := json.Marshal(resp)
 	if err != nil {
-		p.writeError(w, http.StatusInternalServerError, "internal_error", "Failed to serialize response")
-		return
+		return nil, fmt.Errorf("failed to serialize response: %w", err)
 	}
 
-	// Store in cache if cacheable
-	if cacheable && cacheKey != "" {
-		p.cache.Set(cacheKey, respBytes, req.Model)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Request-ID", requestID)
-	w.Header().Set("X-Cache", "MISS")
-	w.Write(respBytes)
+	return respBytes, nil
 }
 
 func (p *Proxy) handleStreamingChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, requestID, username string, startTime time.Time) {
@@ -477,6 +512,33 @@ func (p *Proxy) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := p.extractUsername(r)
+
+	// Embeddings are always cacheable (deterministic output)
+	cacheKey := cache.GenerateEmbeddingKey(req.Model, req.Input, req.Dimensions)
+
+	// Check cache first
+	if p.cache != nil {
+		if cachedData, found := p.cache.Get(cacheKey); found {
+			latency := time.Since(startTime)
+
+			if p.metrics != nil {
+				p.metrics.RecordCacheHit()
+			}
+
+			p.logRequest(requestID, username, "cache", req.Model, "/v1/embeddings", 0, 0, latency, 0, http.StatusOK, "cache_hit", false)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Request-ID", requestID)
+			w.Header().Set("X-Cache", "HIT")
+			w.Write(cachedData)
+			return
+		}
+
+		if p.metrics != nil {
+			p.metrics.RecordCacheMiss()
+		}
+	}
+
 	hostgroup, _ := p.router.RouteRequest(req.Model, "", username, 0)
 	server, err := p.balancer.SelectServer(ctx, hostgroup)
 	if err != nil {
@@ -491,36 +553,67 @@ func (p *Proxy) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := prov.Embedding(ctx, &req)
+	// Use deduplication for identical embedding requests
+	respBytes, callErr, wasDeduplicated := p.cache.DeduplicatedCall(cacheKey, func() ([]byte, error) {
+		resp, err := prov.Embedding(ctx, &req)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(resp)
+	})
 
 	latency := time.Since(startTime)
-	success := err == nil
+
+	if wasDeduplicated {
+		if p.metrics != nil {
+			p.metrics.RecordDeduplication()
+		}
+		p.logRequest(requestID, username, "dedupe", req.Model, "/v1/embeddings", 0, 0, latency, 0, http.StatusOK, "deduplicated", false)
+	}
+
+	success := callErr == nil
 	p.balancer.ReleaseServer(server.Name, latency, success)
 
-	if err != nil {
+	if callErr != nil {
 		statusCode := http.StatusInternalServerError
-		if provErr, ok := err.(*provider.ProviderError); ok {
+		if provErr, ok := callErr.(*provider.ProviderError); ok {
 			statusCode = provErr.StatusCode
 		}
-		p.writeError(w, statusCode, "provider_error", err.Error())
-		p.logRequest(requestID, username, server.Name, req.Model, "/v1/embeddings", 0, 0, latency, 0, statusCode, err.Error(), false)
+		p.writeError(w, statusCode, "provider_error", callErr.Error())
+		p.logRequest(requestID, username, server.Name, req.Model, "/v1/embeddings", 0, 0, latency, 0, statusCode, callErr.Error(), false)
 		return
 	}
+
+	// Parse response to get token count for logging
+	var resp openai.EmbeddingResponse
+	json.Unmarshal(respBytes, &resp)
 
 	var tokens int
 	if resp.Usage != nil {
 		tokens = resp.Usage.TotalTokens
 	}
 
-	p.logRequest(requestID, username, server.Name, req.Model, "/v1/embeddings", tokens, 0, latency, 0, http.StatusOK, "", false)
+	if !wasDeduplicated {
+		p.logRequest(requestID, username, server.Name, req.Model, "/v1/embeddings", tokens, 0, latency, 0, http.StatusOK, "", false)
+	}
 
 	if p.metrics != nil {
 		p.metrics.RecordRequest(server.Name, req.Model, true, latency, tokens, 0)
 	}
 
+	// Store in cache (embeddings have long TTL)
+	if p.cache != nil && !wasDeduplicated {
+		p.cache.Set(cacheKey, respBytes, req.Model, "/v1/embeddings")
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", requestID)
-	json.NewEncoder(w).Encode(resp)
+	if wasDeduplicated {
+		w.Header().Set("X-Cache", "DEDUPE")
+	} else {
+		w.Header().Set("X-Cache", "MISS")
+	}
+	w.Write(respBytes)
 }
 
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {

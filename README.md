@@ -5,11 +5,17 @@
 </p>
 
 <p align="center">
+  <a href="https://www.mindbalancer.org">🌐 Website</a> •
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
-  <a href="#web-dashboard">Web Dashboard</a> •
-  <a href="#mindsql-reference">mindsql CLI</a>
+  <a href="https://www.mindbalancer.org/docs">📖 Docs</a>
+</p>
+
+<p align="center">
+  <a href="https://www.mindbalancer.org"><img src="https://img.shields.io/badge/Website-mindbalancer.org-7c3aed?style=flat-square" alt="Website"></a>
+  <a href="https://github.com/mindbalancer/mindbalancer-labs/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
+  <a href="mailto:burak1607@gmail.com"><img src="https://img.shields.io/badge/Contact-burak1607%40gmail.com-blue?style=flat-square" alt="Contact"></a>
 </p>
 
 ---
@@ -599,6 +605,17 @@ MIT License — See [LICENSE](LICENSE) for details.
 
 ---
 
+## Support & Contact
+
+- 🌐 **Website:** [www.mindbalancer.org](https://www.mindbalancer.org)
+- 📖 **Documentation:** [www.mindbalancer.org/docs](https://www.mindbalancer.org/docs)
+- 📧 **Email:** [burak1607@gmail.com](mailto:burak1607@gmail.com)
+- 🐛 **Issues:** [GitHub Issues](https://github.com/mindbalancer/mindbalancer-labs/issues)
+- 💬 **Discussions:** [GitHub Discussions](https://github.com/mindbalancer/mindbalancer-labs/discussions)
+
+---
+
 <p align="center">
-  Built with ❤️ for the AI infrastructure community
+  Built with ❤️ for the AI infrastructure community<br>
+  <a href="https://www.mindbalancer.org">www.mindbalancer.org</a>
 </p>

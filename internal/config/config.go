@@ -78,6 +78,15 @@ type Config struct {
 	TLSCertFile string
 	TLSKeyFile  string
 
+	// Cache
+	CacheEnabled            bool
+	CacheMaxSize            int   // Maximum number of cached items
+	CacheMaxMemoryMB        int   // Maximum memory usage in MB
+	CacheTTLSeconds         int   // Default TTL in seconds
+	CacheMaxItemSizeKB      int   // Maximum size of a single item in KB
+	CacheCompressionEnabled bool  // Enable compression
+	CacheEmbeddingsTTLHours int   // TTL for embeddings in hours
+
 	// Cluster
 	ClusterEnabled bool
 	ClusterName    string
@@ -148,12 +157,21 @@ func DefaultConfig() *Config {
 
 		// Default model-specific timeouts (longer for reasoning models)
 		ModelTimeouts: map[string]int{
-			"o1":         300000, // 5 minutes for o1
-			"o1-preview": 300000, // 5 minutes for o1-preview  
-			"o1-mini":    180000, // 3 minutes for o1-mini
-			"gpt-4":      120000, // 2 minutes default
+			"o1":            300000, // 5 minutes for o1
+			"o1-preview":    300000, // 5 minutes for o1-preview
+			"o1-mini":       180000, // 3 minutes for o1-mini
+			"gpt-4":         120000, // 2 minutes default
 			"claude-3-opus": 180000, // 3 minutes for opus
 		},
+
+		// Cache defaults
+		CacheEnabled:            true,
+		CacheMaxSize:            10000,           // 10k items total
+		CacheMaxMemoryMB:        512,             // 512MB
+		CacheTTLSeconds:         300,             // 5 minutes
+		CacheMaxItemSizeKB:      2048,            // 2MB per item
+		CacheCompressionEnabled: true,
+		CacheEmbeddingsTTLHours: 24,              // 24 hours for embeddings
 	}
 }
 
@@ -256,6 +274,15 @@ func Load(path string) (*Config, error) {
 		cfg.ClusterPeers = strings.Split(peersStr, ",")
 	}
 
+	// Cache
+	cfg.CacheEnabled = section.Key("cache_enabled").MustBool(cfg.CacheEnabled)
+	cfg.CacheMaxSize = section.Key("cache_max_size").MustInt(cfg.CacheMaxSize)
+	cfg.CacheMaxMemoryMB = section.Key("cache_max_memory_mb").MustInt(cfg.CacheMaxMemoryMB)
+	cfg.CacheTTLSeconds = section.Key("cache_ttl_seconds").MustInt(cfg.CacheTTLSeconds)
+	cfg.CacheMaxItemSizeKB = section.Key("cache_max_item_size_kb").MustInt(cfg.CacheMaxItemSizeKB)
+	cfg.CacheCompressionEnabled = section.Key("cache_compression_enabled").MustBool(cfg.CacheCompressionEnabled)
+	cfg.CacheEmbeddingsTTLHours = section.Key("cache_embeddings_ttl_hours").MustInt(cfg.CacheEmbeddingsTTLHours)
+
 	return cfg, nil
 }
 
@@ -341,21 +368,28 @@ func (c *Config) GetAllVariables() map[string]string {
 	defer c.mu.RUnlock()
 
 	return map[string]string{
-		"admin_bind_address":        c.AdminBindAddress,
-		"admin_port":                strconv.Itoa(c.AdminPort),
-		"proxy_bind_address":        c.ProxyBindAddress,
-		"proxy_port":                strconv.Itoa(c.ProxyPort),
-		"data_dir":                  c.DataDir,
-		"log_level":                 c.LogLevel,
-		"log_format":                c.LogFormat,
-		"failover_enabled":          strconv.FormatBool(c.FailoverEnabled),
-		"max_retries":               strconv.Itoa(c.MaxRetries),
-		"circuit_breaker_enabled":   strconv.FormatBool(c.CircuitBreakerEnabled),
-		"circuit_breaker_threshold": strconv.Itoa(c.CircuitBreakerThreshold),
-		"health_check_enabled":      strconv.FormatBool(c.HealthCheckEnabled),
-		"health_check_interval_ms":  strconv.Itoa(c.HealthCheckIntervalMS),
-		"prometheus_enabled":        strconv.FormatBool(c.PrometheusEnabled),
-		"prometheus_port":           strconv.Itoa(c.PrometheusPort),
+		"admin_bind_address":          c.AdminBindAddress,
+		"admin_port":                  strconv.Itoa(c.AdminPort),
+		"proxy_bind_address":          c.ProxyBindAddress,
+		"proxy_port":                  strconv.Itoa(c.ProxyPort),
+		"data_dir":                    c.DataDir,
+		"log_level":                   c.LogLevel,
+		"log_format":                  c.LogFormat,
+		"failover_enabled":            strconv.FormatBool(c.FailoverEnabled),
+		"max_retries":                 strconv.Itoa(c.MaxRetries),
+		"circuit_breaker_enabled":     strconv.FormatBool(c.CircuitBreakerEnabled),
+		"circuit_breaker_threshold":   strconv.Itoa(c.CircuitBreakerThreshold),
+		"health_check_enabled":        strconv.FormatBool(c.HealthCheckEnabled),
+		"health_check_interval_ms":    strconv.Itoa(c.HealthCheckIntervalMS),
+		"prometheus_enabled":          strconv.FormatBool(c.PrometheusEnabled),
+		"prometheus_port":             strconv.Itoa(c.PrometheusPort),
+		"cache_enabled":               strconv.FormatBool(c.CacheEnabled),
+		"cache_max_size":              strconv.Itoa(c.CacheMaxSize),
+		"cache_max_memory_mb":         strconv.Itoa(c.CacheMaxMemoryMB),
+		"cache_ttl_seconds":           strconv.Itoa(c.CacheTTLSeconds),
+		"cache_max_item_size_kb":      strconv.Itoa(c.CacheMaxItemSizeKB),
+		"cache_compression_enabled":   strconv.FormatBool(c.CacheCompressionEnabled),
+		"cache_embeddings_ttl_hours":  strconv.Itoa(c.CacheEmbeddingsTTLHours),
 	}
 }
 
@@ -452,4 +486,31 @@ func (c *Config) GetAllModelTimeouts() map[string]int {
 		result[k] = v
 	}
 	return result
+}
+
+// CacheConfig holds cache-specific configuration for the cache package.
+type CacheConfig struct {
+	Enabled            bool
+	MaxSize            int
+	MaxMemoryMB        int
+	TTL                time.Duration
+	MaxItemSize        int64
+	CompressionEnabled bool
+	EmbeddingsTTL      time.Duration
+}
+
+// GetCacheConfig returns cache configuration suitable for the cache package.
+func (c *Config) GetCacheConfig() CacheConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return CacheConfig{
+		Enabled:            c.CacheEnabled,
+		MaxSize:            c.CacheMaxSize,
+		MaxMemoryMB:        c.CacheMaxMemoryMB,
+		TTL:                time.Duration(c.CacheTTLSeconds) * time.Second,
+		MaxItemSize:        int64(c.CacheMaxItemSizeKB) * 1024,
+		CompressionEnabled: c.CacheCompressionEnabled,
+		EmbeddingsTTL:      time.Duration(c.CacheEmbeddingsTTLHours) * time.Hour,
+	}
 }

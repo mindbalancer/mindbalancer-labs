@@ -38,8 +38,13 @@ type Collector struct {
 	errorsTotal *prometheus.CounterVec
 
 	// Cache metrics
-	cacheHits   prometheus.Counter
-	cacheMisses prometheus.Counter
+	cacheHits           prometheus.Counter
+	cacheMisses         prometheus.Counter
+	cacheEvictions      prometheus.Counter
+	cacheDeduplication  prometheus.Counter
+	cacheMemoryBytes    prometheus.Gauge
+	cacheItemCount      prometheus.Gauge
+	cacheCompressionSaved prometheus.Counter
 
 	registry *prometheus.Registry
 
@@ -114,6 +119,36 @@ func NewCollector() *Collector {
 		prometheus.CounterOpts{
 			Name: "mindbalancer_cache_misses_total",
 			Help: "Total number of cache misses",
+		},
+	)
+	c.cacheEvictions = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_cache_evictions_total",
+			Help: "Total number of cache evictions",
+		},
+	)
+	c.cacheDeduplication = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_cache_deduplications_total",
+			Help: "Total number of deduplicated requests",
+		},
+	)
+	c.cacheMemoryBytes = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "mindbalancer_cache_memory_bytes",
+			Help: "Current cache memory usage in bytes",
+		},
+	)
+	c.cacheItemCount = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "mindbalancer_cache_items",
+			Help: "Current number of items in cache",
+		},
+	)
+	c.cacheCompressionSaved = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_cache_compression_saved_bytes_total",
+			Help: "Total bytes saved by compression",
 		},
 	)
 
@@ -204,6 +239,11 @@ func NewCollector() *Collector {
 		c.costTotal,
 		c.cacheHits,
 		c.cacheMisses,
+		c.cacheEvictions,
+		c.cacheDeduplication,
+		c.cacheMemoryBytes,
+		c.cacheItemCount,
+		c.cacheCompressionSaved,
 		c.serverStatus,
 		c.circuitBreakerState,
 		c.serverLatency,
@@ -365,6 +405,37 @@ func (c *Collector) RecordCacheHit() {
 // RecordCacheMiss records a cache miss.
 func (c *Collector) RecordCacheMiss() {
 	c.cacheMisses.Inc()
+}
+
+// RecordCacheEviction records a cache eviction.
+func (c *Collector) RecordCacheEviction() {
+	c.cacheEvictions.Inc()
+}
+
+// RecordDeduplication records a deduplicated request.
+func (c *Collector) RecordDeduplication() {
+	c.cacheDeduplication.Inc()
+}
+
+// SetCacheMemory sets the current cache memory usage.
+func (c *Collector) SetCacheMemory(bytes int64) {
+	c.cacheMemoryBytes.Set(float64(bytes))
+}
+
+// SetCacheItemCount sets the current cache item count.
+func (c *Collector) SetCacheItemCount(count int) {
+	c.cacheItemCount.Set(float64(count))
+}
+
+// AddCompressionSaved adds bytes saved by compression.
+func (c *Collector) AddCompressionSaved(bytes int64) {
+	c.cacheCompressionSaved.Add(float64(bytes))
+}
+
+// UpdateCacheStats updates all cache-related metrics from cache stats.
+func (c *Collector) UpdateCacheStats(memoryUsed int64, itemCount int, evictions int64, compressionSaved int64) {
+	c.cacheMemoryBytes.Set(float64(memoryUsed))
+	c.cacheItemCount.Set(float64(itemCount))
 }
 
 // CostSummary holds cost summary information.

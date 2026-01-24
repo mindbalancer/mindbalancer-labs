@@ -69,3 +69,17 @@ tls_key_file = /etc/mindbalancer/server.key
 cluster_enabled = false
 cluster_name = mindbalancer-cluster
 cluster_peers = []
+
+# Cache Configuration
+# MindBalancer provides intelligent response caching with:
+# - Request deduplication (identical concurrent requests share one LLM call)
+# - Sharded LRU cache with TTL
+# - Automatic compression for large responses
+# - Separate TTLs for chat completions and embeddings
+cache_enabled = true
+cache_max_size = 10000                 # Maximum number of cached items
+cache_max_memory_mb = 512              # Maximum memory usage (0 = unlimited)
+cache_ttl_seconds = 300                # Default TTL (5 minutes for chat)
+cache_max_item_size_kb = 2048          # Maximum single item size (2MB)
+cache_compression_enabled = true       # Compress responses > 1KB
+cache_embeddings_ttl_hours = 24        # Embeddings TTL (24 hours, deterministic)

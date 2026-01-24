@@ -27,7 +27,7 @@ type AnthropicRequest struct {
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
 	TopK          *int               `json:"top_k,omitempty"`
-	System        string             `json:"system,omitempty"`
+	System        any                `json:"system,omitempty"` // string or []SystemBlock for caching
 	StopSequences []string           `json:"stop_sequences,omitempty"`
 	Stream        bool               `json:"stream,omitempty"`
 }
@@ -36,6 +36,25 @@ type AnthropicRequest struct {
 type AnthropicMessage struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"` // string or []ContentBlock
+}
+
+// CacheControl represents cache control for prompt caching.
+type CacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+// SystemBlock represents a system message block with optional cache control.
+type SystemBlock struct {
+	Type         string        `json:"type"`          // "text"
+	Text         string        `json:"text"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// ContentBlock represents a content block with optional cache control.
+type ContentBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // AnthropicResponse represents an Anthropic API response.
@@ -58,8 +77,10 @@ type AnthropicContent struct {
 
 // AnthropicUsage represents usage in an Anthropic response.
 type AnthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }
 
 // NewAnthropic creates a new Anthropic provider.
@@ -76,6 +97,7 @@ func (p *Anthropic) Name() string {
 func (p *Anthropic) authHeaders() map[string]string {
 	headers := map[string]string{
 		"anthropic-version": "2023-06-01",
+		"anthropic-beta":    "prompt-caching-2024-07-31", // Enable prompt caching
 	}
 	if p.Server.APIKeyEncrypted != "" {
 		headers["x-api-key"] = p.Server.APIKeyEncrypted
@@ -83,7 +105,15 @@ func (p *Anthropic) authHeaders() map[string]string {
 	return headers
 }
 
-// convertToAnthropic converts OpenAI request to Anthropic format.
+// Minimum tokens for prompt caching (Anthropic requires at least 1024 tokens for caching)
+const minTokensForCaching = 1024
+
+// estimateTokens roughly estimates token count (avg 4 chars per token)
+func estimateTokens(text string) int {
+	return len(text) / 4
+}
+
+// convertToAnthropic converts OpenAI request to Anthropic format with prompt caching support.
 func (p *Anthropic) convertToAnthropic(req *openai.ChatCompletionRequest) *AnthropicRequest {
 	ar := &AnthropicRequest{
 		Model:       req.Model,
@@ -98,11 +128,12 @@ func (p *Anthropic) convertToAnthropic(req *openai.ChatCompletionRequest) *Anthr
 		ar.MaxTokens = *req.MaxTokens
 	}
 
+	var systemContent string
 	for _, msg := range req.Messages {
 		// Extract system message
 		if msg.Role == "system" {
 			if content, ok := msg.Content.(string); ok {
-				ar.System = content
+				systemContent = content
 			}
 			continue
 		}
@@ -125,6 +156,49 @@ func (p *Anthropic) convertToAnthropic(req *openai.ChatCompletionRequest) *Anthr
 		}
 
 		ar.Messages = append(ar.Messages, am)
+	}
+
+	// Apply prompt caching to system message if it's large enough
+	if systemContent != "" {
+		if estimateTokens(systemContent) >= minTokensForCaching {
+			// Use structured system with cache_control for large system prompts
+			ar.System = []SystemBlock{
+				{
+					Type: "text",
+					Text: systemContent,
+					CacheControl: &CacheControl{
+						Type: "ephemeral",
+					},
+				},
+			}
+		} else {
+			ar.System = systemContent
+		}
+	}
+
+	// Mark the last long user message for caching (useful for few-shot examples)
+	if len(ar.Messages) > 0 {
+		lastIdx := len(ar.Messages) - 1
+		// Find the last user message with substantial content
+		for i := lastIdx; i >= 0; i-- {
+			if ar.Messages[i].Role == "user" {
+				if content, ok := ar.Messages[i].Content.(string); ok {
+					if estimateTokens(content) >= minTokensForCaching {
+						// Convert to content block with cache control
+						ar.Messages[i].Content = []ContentBlock{
+							{
+								Type: "text",
+								Text: content,
+								CacheControl: &CacheControl{
+									Type: "ephemeral",
+								},
+							},
+						}
+					}
+				}
+				break
+			}
+		}
 	}
 
 	if len(req.Stop) > 0 {
@@ -153,6 +227,19 @@ func (p *Anthropic) convertToOpenAI(resp *AnthropicResponse) *openai.ChatComplet
 		finishReason = "stop"
 	}
 
+	usage := &openai.Usage{
+		PromptTokens:     resp.Usage.InputTokens,
+		CompletionTokens: resp.Usage.OutputTokens,
+		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+	}
+
+	// Include cache information if available
+	if resp.Usage.CacheReadInputTokens > 0 || resp.Usage.CacheCreationInputTokens > 0 {
+		usage.PromptTokensDetails = &openai.PromptTokensDetails{
+			CachedTokens: resp.Usage.CacheReadInputTokens,
+		}
+	}
+
 	return &openai.ChatCompletionResponse{
 		ID:      resp.ID,
 		Object:  "chat.completion",
@@ -168,11 +255,7 @@ func (p *Anthropic) convertToOpenAI(resp *AnthropicResponse) *openai.ChatComplet
 				FinishReason: finishReason,
 			},
 		},
-		Usage: &openai.Usage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		},
+		Usage: usage,
 	}
 }
 

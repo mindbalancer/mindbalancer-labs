@@ -529,13 +529,16 @@ func (a *Admin) handleCache(w http.ResponseWriter, r *http.Request) {
 		// Get cache status and stats
 		stats := a.cache.Stats()
 		response := map[string]any{
-			"enabled":    a.cache.IsEnabled(),
-			"hits":       stats.Hits,
-			"misses":     stats.Misses,
-			"hit_rate":   a.cache.HitRate(),
-			"evictions":  stats.Evictions,
-			"size_bytes": stats.Size,
-			"item_count": stats.ItemCount,
+			"enabled":            a.cache.IsEnabled(),
+			"hits":               stats.Hits,
+			"misses":             stats.Misses,
+			"hit_rate":           stats.HitRate,
+			"evictions":          stats.Evictions,
+			"deduplicated_reqs":  stats.DeduplicatedReqs,
+			"compression_saved":  stats.CompressionSaved,
+			"memory_used_bytes":  stats.MemoryUsed,
+			"item_count":         stats.ItemCount,
+			"avg_item_size":      stats.AvgItemSize,
 		}
 		a.writeJSON(w, response)
 
@@ -1057,16 +1060,19 @@ func (a *Admin) executeShowCacheStatus() (string, error) {
 
 	var sb strings.Builder
 	sb.WriteString("+------------------+------------------+\n")
-	sb.WriteString("| Variable         | Value            |\n")
-	sb.WriteString("+------------------+------------------+\n")
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16s |\n", "status", enabled))
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "hits", stats.Hits))
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "misses", stats.Misses))
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16.2f |\n", "hit_rate", a.cache.HitRate()))
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "evictions", stats.Evictions))
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "size_bytes", stats.Size))
-	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "item_count", stats.ItemCount))
-	sb.WriteString("+------------------+------------------+\n")
+	sb.WriteString("| Variable           | Value              |\n")
+	sb.WriteString("+--------------------+--------------------+\n")
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18s |\n", "status", enabled))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "hits", stats.Hits))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "misses", stats.Misses))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18.2f |\n", "hit_rate", stats.HitRate))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "evictions", stats.Evictions))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "deduplicated", stats.DeduplicatedReqs))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "compression_saved", stats.CompressionSaved))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "memory_bytes", stats.MemoryUsed))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18d |\n", "item_count", stats.ItemCount))
+	sb.WriteString(fmt.Sprintf("| %-18s | %-18.0f |\n", "avg_item_size", stats.AvgItemSize))
+	sb.WriteString("+--------------------+--------------------+\n")
 
 	return sb.String(), nil
 }
