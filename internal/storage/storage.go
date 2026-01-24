@@ -11,12 +11,15 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/mindbalancer/mindbalancer/internal/crypto"
 )
 
 // Storage handles all database operations.
 type Storage struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db        *sql.DB
+	mu        sync.RWMutex
+	encryptor *crypto.Encryptor
 }
 
 // ServerStatus represents the status of an AI server.
@@ -103,6 +106,11 @@ type RequestLog struct {
 
 // New creates a new Storage instance.
 func New(dbPath string) (*Storage, error) {
+	return NewWithEncryption(dbPath, "")
+}
+
+// NewWithEncryption creates a new Storage instance with API key encryption.
+func NewWithEncryption(dbPath, encryptionKey string) (*Storage, error) {
 	// Ensure directory exists
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -118,7 +126,14 @@ func New(dbPath string) (*Storage, error) {
 	db.SetMaxOpenConns(1) // SQLite works best with single connection
 	db.SetMaxIdleConns(1)
 
-	s := &Storage{db: db}
+	// Create encryptor
+	encryptor, err := crypto.NewEncryptor(encryptionKey)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create encryptor: %w", err)
+	}
+
+	s := &Storage{db: db, encryptor: encryptor}
 
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -305,11 +320,21 @@ func (s *Storage) InsertServer(ctx context.Context, srv *Server) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Encrypt API key if provided
+	apiKey := srv.APIKeyEncrypted
+	if apiKey != "" && s.encryptor != nil {
+		encrypted, err := s.encryptor.Encrypt(apiKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt API key: %w", err)
+		}
+		apiKey = encrypted
+	}
+
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, 
 			hostgroup, weight, max_connections, status, comment)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		srv.Name, srv.ProviderType, srv.Endpoint, srv.APIKeyEncrypted,
+		srv.Name, srv.ProviderType, srv.Endpoint, apiKey,
 		srv.Hostgroup, srv.Weight, srv.MaxConnections, srv.Status, srv.Comment)
 	if err != nil {
 		return err
@@ -324,13 +349,23 @@ func (s *Storage) UpdateServer(ctx context.Context, srv *Server) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Encrypt API key if provided
+	apiKey := srv.APIKeyEncrypted
+	if apiKey != "" && s.encryptor != nil {
+		encrypted, err := s.encryptor.Encrypt(apiKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt API key: %w", err)
+		}
+		apiKey = encrypted
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE ai_servers SET 
 			provider_type = ?, endpoint = ?, api_key_encrypted = ?,
 			hostgroup = ?, weight = ?, max_connections = ?, 
 			status = ?, comment = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE name = ?`,
-		srv.ProviderType, srv.Endpoint, srv.APIKeyEncrypted,
+		srv.ProviderType, srv.Endpoint, apiKey,
 		srv.Hostgroup, srv.Weight, srv.MaxConnections,
 		srv.Status, srv.Comment, srv.Name)
 	return err
@@ -739,4 +774,76 @@ func (s *Storage) GetAllVariables(ctx context.Context) (map[string]string, error
 // DB returns the underlying database connection for advanced queries.
 func (s *Storage) DB() *sql.DB {
 	return s.db
+}
+
+// DecryptAPIKey decrypts an API key using the storage's encryptor.
+func (s *Storage) DecryptAPIKey(encryptedKey string) (string, error) {
+	if encryptedKey == "" {
+		return "", nil
+	}
+	if s.encryptor == nil {
+		return encryptedKey, nil
+	}
+	return s.encryptor.Decrypt(encryptedKey)
+}
+
+// EncryptAPIKey encrypts an API key using the storage's encryptor.
+func (s *Storage) EncryptAPIKey(plainKey string) (string, error) {
+	if plainKey == "" {
+		return "", nil
+	}
+	if s.encryptor == nil {
+		return plainKey, nil
+	}
+	return s.encryptor.Encrypt(plainKey)
+}
+
+// GetServerWithDecryptedKey returns a server with the API key decrypted.
+func (s *Storage) GetServerWithDecryptedKey(ctx context.Context, name string) (*Server, error) {
+	srv, err := s.GetServerByName(ctx, name)
+	if err != nil || srv == nil {
+		return srv, err
+	}
+
+	if srv.APIKeyEncrypted != "" && s.encryptor != nil {
+		decrypted, err := s.encryptor.Decrypt(srv.APIKeyEncrypted)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt API key: %w", err)
+		}
+		srv.APIKeyEncrypted = decrypted
+	}
+	return srv, nil
+}
+
+// GetServersWithDecryptedKeys returns all servers with decrypted API keys.
+func (s *Storage) GetServersWithDecryptedKeys(ctx context.Context, hostgroup *int) ([]Server, error) {
+	servers, err := s.GetServers(ctx, hostgroup)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.encryptor == nil {
+		return servers, nil
+	}
+
+	for i := range servers {
+		if servers[i].APIKeyEncrypted != "" {
+			decrypted, err := s.encryptor.Decrypt(servers[i].APIKeyEncrypted)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt API key for %s: %w", servers[i].Name, err)
+			}
+			servers[i].APIKeyEncrypted = decrypted
+		}
+	}
+	return servers, nil
+}
+
+// MaskAPIKey returns a masked version of an API key.
+func (s *Storage) MaskAPIKey(key string) string {
+	return crypto.MaskAPIKey(key)
+}
+
+// IsEncryptionEnabled returns whether encryption is enabled.
+func (s *Storage) IsEncryptionEnabled() bool {
+	return s.encryptor != nil && s.encryptor.IsEnabled()
 }

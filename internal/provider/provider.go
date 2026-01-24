@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mindbalancer/mindbalancer/api/openai"
+	"github.com/mindbalancer/mindbalancer/internal/pool"
 	"github.com/mindbalancer/mindbalancer/internal/storage"
 )
 
@@ -57,12 +58,11 @@ type BaseProvider struct {
 }
 
 // NewBaseProvider creates a new base provider.
+// Uses the global connection pool for efficient connection reuse.
 func NewBaseProvider(server storage.Server, timeout time.Duration) *BaseProvider {
 	return &BaseProvider{
-		Server: server,
-		Client: &http.Client{
-			Timeout: timeout,
-		},
+		Server:  server,
+		Client:  pool.GetGlobalClientWithTimeout(timeout),
 		Timeout: timeout,
 	}
 }

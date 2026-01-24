@@ -6,6 +6,7 @@ require (
 	github.com/go-sql-driver/mysql v1.7.1
 	github.com/google/uuid v1.4.0
 	github.com/mattn/go-sqlite3 v1.14.19
+	github.com/peterh/liner v1.2.2
 	github.com/prometheus/client_golang v1.17.0
 	gopkg.in/ini.v1 v1.67.0
 )
@@ -16,7 +17,6 @@ require (
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/mattn/go-runewidth v0.0.3 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
-	github.com/peterh/liner v1.2.2 // indirect
 	github.com/prometheus/client_model v0.4.1-0.20230718164431-9a2bf3000d16 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.11.1 // indirect

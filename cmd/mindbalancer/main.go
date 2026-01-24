@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/mindbalancer/mindbalancer/internal/config"
 	"github.com/mindbalancer/mindbalancer/internal/health"
 	"github.com/mindbalancer/mindbalancer/internal/metrics"
+	"github.com/mindbalancer/mindbalancer/internal/pool"
 	"github.com/mindbalancer/mindbalancer/internal/proxy"
 	"github.com/mindbalancer/mindbalancer/internal/ratelimit"
 	"github.com/mindbalancer/mindbalancer/internal/router"
@@ -58,12 +60,31 @@ func main() {
 	log.Printf("Starting MindBalancer version=%s admin_port=%d proxy_port=%d",
 		Version, cfg.AdminPort, cfg.ProxyPort)
 
-	// Initialize storage
-	store, err := storage.New(cfg.DBPath())
+	// Initialize connection pool
+	poolCfg := pool.Config{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: cfg.MaxConnectionsPerServer,
+		MaxConnsPerHost:     cfg.MaxConnectionsPerServer,
+		IdleConnTimeout:     time.Duration(cfg.IdleTimeoutMS) * time.Millisecond,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ResponseTimeout:     time.Duration(cfg.RequestTimeoutMS) * time.Millisecond,
+		KeepAlive:           30 * time.Second,
+	}
+	pool.InitGlobalPool(poolCfg)
+	log.Printf("Connection pool initialized: max_conns_per_host=%d", cfg.MaxConnectionsPerServer)
+
+	// Initialize storage with encryption
+	store, err := storage.NewWithEncryption(cfg.DBPath(), cfg.APIKeyEncryptionKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
 	defer store.Close()
+
+	if store.IsEncryptionEnabled() {
+		log.Println("API key encryption enabled")
+	} else {
+		log.Println("Warning: API key encryption disabled - set api_key_encryption_key in config")
+	}
 
 	// Initialize circuit breaker manager
 	circuitMgr := circuit.NewManager(
@@ -176,31 +197,89 @@ func main() {
 		}()
 	}
 
-	// Wait for shutdown signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Track active requests for graceful shutdown
+	var activeRequests int64
 
-	select {
-	case sig := <-sigCh:
-		log.Printf("Received shutdown signal: %v", sig)
-	case err := <-errCh:
-		log.Printf("Server error: %v", err)
+	// Wait for shutdown or reload signal
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == syscall.SIGHUP {
+				// Reload configuration
+				log.Println("Received SIGHUP - reloading configuration...")
+				newCfg, err := config.Load(*configPath)
+				if err != nil {
+					log.Printf("Failed to reload config: %v", err)
+					continue
+				}
+				// Update runtime-changeable settings
+				cfg.LogLevel = newCfg.LogLevel
+				cfg.MaxRetries = newCfg.MaxRetries
+				cfg.CircuitBreakerThreshold = newCfg.CircuitBreakerThreshold
+				cfg.DefaultRequestsPerMinute = newCfg.DefaultRequestsPerMinute
+				cfg.DefaultTokensPerMinute = newCfg.DefaultTokensPerMinute
+				log.Println("Configuration reloaded successfully")
+				continue
+			}
+			log.Printf("Received shutdown signal: %v", sig)
+		case err := <-errCh:
+			log.Printf("Server error: %v", err)
+		}
+		break
 	}
 
-	// Graceful shutdown
-	log.Println("Shutting down...")
+	// Graceful shutdown with request draining
+	log.Println("Initiating graceful shutdown...")
 
+	// Stop accepting new connections first
+	healthChecker.Stop()
+	
+	// Create shutdown context with timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	healthChecker.Stop()
+	// Shutdown HTTP servers (this will stop accepting new requests)
+	shutdownDone := make(chan struct{})
+	go func() {
+		if metricsServer != nil {
+			metricsServer.Shutdown(shutdownCtx)
+		}
+		adminServer.Shutdown(shutdownCtx)
+		proxyServer.Shutdown(shutdownCtx)
+		close(shutdownDone)
+	}()
+
+	// Wait for active requests to complete
+	drainTicker := time.NewTicker(100 * time.Millisecond)
+	drainTimeout := time.After(25 * time.Second)
+	
+drainLoop:
+	for {
+		select {
+		case <-drainTimeout:
+			log.Printf("Drain timeout - forcing shutdown with %d active requests", atomic.LoadInt64(&activeRequests))
+			break drainLoop
+		case <-drainTicker.C:
+			active := atomic.LoadInt64(&activeRequests)
+			if active == 0 {
+				log.Println("All requests drained")
+				break drainLoop
+			}
+			log.Printf("Waiting for %d active requests to complete...", active)
+		case <-shutdownDone:
+			break drainLoop
+		}
+	}
+	drainTicker.Stop()
+
+	// Stop MySQL server
 	mysqlServer.Stop()
 
-	if metricsServer != nil {
-		metricsServer.Shutdown(shutdownCtx)
-	}
-	adminServer.Shutdown(shutdownCtx)
-	proxyServer.Shutdown(shutdownCtx)
+	// Close connection pool
+	pool.GlobalPool().CloseIdleConnections()
 
 	log.Println("Shutdown complete")
 }

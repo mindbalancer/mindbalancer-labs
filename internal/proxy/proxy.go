@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/mindbalancer/mindbalancer/internal/metrics"
 	"github.com/mindbalancer/mindbalancer/internal/provider"
 	"github.com/mindbalancer/mindbalancer/internal/ratelimit"
+	"github.com/mindbalancer/mindbalancer/internal/retry"
 	"github.com/mindbalancer/mindbalancer/internal/router"
 	"github.com/mindbalancer/mindbalancer/internal/storage"
 )
@@ -143,8 +145,9 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create provider
-	prov := provider.New(*server, p.config.RequestTimeout())
+	// Create provider with model-specific timeout
+	timeout := p.config.GetModelTimeout(req.Model)
+	prov := provider.New(*server, timeout)
 
 	// Handle streaming vs non-streaming
 	if req.Stream {
@@ -155,21 +158,79 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, requestID, username string, startTime time.Time) {
-	resp, err := prov.ChatCompletion(ctx, req)
+	// Get model-specific timeout
+	timeout := p.config.GetModelTimeout(req.Model)
+	
+	// Configure retry with exponential backoff
+	retryCfg := retry.Config{
+		MaxRetries:   p.config.MaxRetries,
+		InitialDelay: p.config.RetryDelay(),
+		MaxDelay:     p.config.RetryMaxDelay(),
+		Multiplier:   p.config.RetryMultiplier,
+		Jitter:       0.1,
+	}
 
+	var resp *openai.ChatCompletionResponse
+	var lastErr error
+	var usedServer *storage.Server = server
+	var usedProv provider.Provider = prov
+	attemptCount := 0
+	_ = timeout // Used in retry loop
+
+	// Retry logic with failover to different servers
+	result := retry.Do(ctx, retryCfg, func(ctx context.Context, attempt int) (*openai.ChatCompletionResponse, error) {
+		attemptCount = attempt + 1
+
+		// On retry, try to get a different server
+		if attempt > 0 {
+			p.balancer.ReleaseServer(usedServer.Name, time.Since(startTime), false)
+			
+			// Extract prompt for routing
+			var promptText string
+			if len(req.Messages) > 0 {
+				if content, ok := req.Messages[len(req.Messages)-1].Content.(string); ok {
+					promptText = content
+				}
+			}
+			hostgroup, _ := p.router.RouteRequest(req.Model, promptText, username, 0)
+			
+			newServer, err := p.balancer.SelectServer(ctx, hostgroup)
+			if err != nil {
+				return nil, retry.NewRetryableError(err, false) // No more servers, don't retry
+			}
+			usedServer = newServer
+			usedProv = provider.New(*newServer, timeout)
+			log.Printf("[RETRY] Attempt %d: switched to server %s", attempt+1, newServer.Name)
+		}
+
+		response, err := usedProv.ChatCompletion(ctx, req)
+		if err != nil {
+			// Check if error is retryable
+			if provErr, ok := err.(*provider.ProviderError); ok {
+				if provErr.IsRetryable() {
+					return nil, retry.NewRetryableError(err, true)
+				}
+			}
+			return nil, retry.NewRetryableError(err, false)
+		}
+		return response, nil
+	})
+
+	resp = result.Value
+	lastErr = result.Err
 	latency := time.Since(startTime)
-	success := err == nil
+	success := lastErr == nil
 
-	// Release server back to pool
-	p.balancer.ReleaseServer(server.Name, latency, success)
+	// Release final server back to pool
+	p.balancer.ReleaseServer(usedServer.Name, latency, success)
 
-	if err != nil {
+	if lastErr != nil {
 		statusCode := http.StatusInternalServerError
-		if provErr, ok := err.(*provider.ProviderError); ok {
+		if provErr, ok := lastErr.(*provider.ProviderError); ok {
 			statusCode = provErr.StatusCode
 		}
-		p.writeError(w, statusCode, "provider_error", err.Error())
-		p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", 0, 0, latency, 0, statusCode, err.Error(), false)
+		p.writeError(w, statusCode, "provider_error", lastErr.Error())
+		p.logRequest(requestID, username, usedServer.Name, req.Model, "/v1/chat/completions", 0, 0, latency, 0, statusCode, fmt.Sprintf("after %d attempts: %s", attemptCount, lastErr.Error()), false)
 		return
 	}
 
@@ -185,10 +246,17 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		p.ratelimit.RecordTokens(username, promptTokens+outputTokens)
 	}
 
-	p.logRequest(requestID, username, server.Name, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
+	p.logRequest(requestID, username, usedServer.Name, req.Model, "/v1/chat/completions", promptTokens, outputTokens, latency, 0, http.StatusOK, "", false)
 
 	if p.metrics != nil {
-		p.metrics.RecordRequest(server.Name, req.Model, true, latency, promptTokens, outputTokens)
+		p.metrics.RecordRequest(usedServer.Name, req.Model, true, latency, promptTokens, outputTokens)
+		// Record cost
+		p.metrics.RecordCost(usedServer.Name, req.Model, usedServer.ProviderType, promptTokens, outputTokens)
+	}
+
+	// Add retry info header if there were retries
+	if attemptCount > 1 {
+		w.Header().Set("X-Retry-Count", strconv.Itoa(attemptCount-1))
 	}
 
 	w.Header().Set("Content-Type", "application/json")

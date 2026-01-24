@@ -82,6 +82,15 @@ type Config struct {
 	ClusterEnabled bool
 	ClusterName    string
 	ClusterPeers   []string
+
+	// Model-specific timeouts (model name -> timeout in ms)
+	ModelTimeouts map[string]int
+}
+
+// ModelTimeout represents a model-specific timeout configuration.
+type ModelTimeout struct {
+	Model     string
+	TimeoutMS int
 }
 
 // DefaultConfig returns a configuration with sensible defaults.
@@ -136,6 +145,15 @@ func DefaultConfig() *Config {
 		ClusterEnabled: false,
 		ClusterName:    "mindbalancer-cluster",
 		ClusterPeers:   []string{},
+
+		// Default model-specific timeouts (longer for reasoning models)
+		ModelTimeouts: map[string]int{
+			"o1":         300000, // 5 minutes for o1
+			"o1-preview": 300000, // 5 minutes for o1-preview  
+			"o1-mini":    180000, // 3 minutes for o1-mini
+			"gpt-4":      120000, // 2 minutes default
+			"claude-3-opus": 180000, // 3 minutes for opus
+		},
 	}
 }
 
@@ -388,4 +406,50 @@ func (c *Config) DBPath() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return filepath.Join(c.DataDir, "mindbalancer.db")
+}
+
+// GetModelTimeout returns the timeout for a specific model.
+// Falls back to default RequestTimeout if not configured.
+func (c *Config) GetModelTimeout(model string) time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.ModelTimeouts != nil {
+		// Try exact match
+		if timeout, ok := c.ModelTimeouts[model]; ok {
+			return time.Duration(timeout) * time.Millisecond
+		}
+
+		// Try prefix match (e.g., "gpt-4o-2024-08-06" matches "gpt-4o")
+		for name, timeout := range c.ModelTimeouts {
+			if len(model) >= len(name) && model[:len(name)] == name {
+				return time.Duration(timeout) * time.Millisecond
+			}
+		}
+	}
+
+	return time.Duration(c.RequestTimeoutMS) * time.Millisecond
+}
+
+// SetModelTimeout sets the timeout for a specific model.
+func (c *Config) SetModelTimeout(model string, timeoutMS int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ModelTimeouts == nil {
+		c.ModelTimeouts = make(map[string]int)
+	}
+	c.ModelTimeouts[model] = timeoutMS
+}
+
+// GetAllModelTimeouts returns all configured model timeouts.
+func (c *Config) GetAllModelTimeouts() map[string]int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	result := make(map[string]int, len(c.ModelTimeouts))
+	for k, v := range c.ModelTimeouts {
+		result[k] = v
+	}
+	return result
 }

@@ -22,6 +22,9 @@ type Collector struct {
 	// Token metrics
 	tokensTotal *prometheus.CounterVec
 
+	// Cost metrics
+	costTotal *prometheus.CounterVec
+
 	// Server metrics
 	serverStatus        *prometheus.GaugeVec
 	circuitBreakerState *prometheus.GaugeVec
@@ -34,7 +37,20 @@ type Collector struct {
 	// Error metrics
 	errorsTotal *prometheus.CounterVec
 
+	// Cache metrics
+	cacheHits   prometheus.Counter
+	cacheMisses prometheus.Counter
+
 	registry *prometheus.Registry
+
+	// Model pricing (USD per 1K tokens)
+	pricing map[string]ModelPricing
+}
+
+// ModelPricing holds pricing information for a model.
+type ModelPricing struct {
+	InputPer1K  float64
+	OutputPer1K float64
 }
 
 // NewCollector creates a new metrics collector.
@@ -77,6 +93,56 @@ func NewCollector() *Collector {
 		},
 		[]string{"server", "direction"}, // direction: input, output
 	)
+
+	// Cost metrics
+	c.costTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_cost_usd_total",
+			Help: "Total estimated cost in USD",
+		},
+		[]string{"server", "model", "provider"},
+	)
+
+	// Cache metrics
+	c.cacheHits = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_cache_hits_total",
+			Help: "Total number of cache hits",
+		},
+	)
+	c.cacheMisses = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mindbalancer_cache_misses_total",
+			Help: "Total number of cache misses",
+		},
+	)
+
+	// Initialize pricing (USD per 1K tokens) - Updated Jan 2025
+	c.pricing = map[string]ModelPricing{
+		// OpenAI
+		"gpt-4":               {InputPer1K: 0.03, OutputPer1K: 0.06},
+		"gpt-4-turbo":         {InputPer1K: 0.01, OutputPer1K: 0.03},
+		"gpt-4o":              {InputPer1K: 0.005, OutputPer1K: 0.015},
+		"gpt-4o-mini":         {InputPer1K: 0.00015, OutputPer1K: 0.0006},
+		"gpt-3.5-turbo":       {InputPer1K: 0.0005, OutputPer1K: 0.0015},
+		"o1":                  {InputPer1K: 0.015, OutputPer1K: 0.06},
+		"o1-mini":             {InputPer1K: 0.003, OutputPer1K: 0.012},
+		"o1-preview":          {InputPer1K: 0.015, OutputPer1K: 0.06},
+		// Anthropic
+		"claude-3-5-sonnet-20241022": {InputPer1K: 0.003, OutputPer1K: 0.015},
+		"claude-3-5-haiku-20241022":  {InputPer1K: 0.0008, OutputPer1K: 0.004},
+		"claude-3-opus-20240229":     {InputPer1K: 0.015, OutputPer1K: 0.075},
+		"claude-3-sonnet-20240229":   {InputPer1K: 0.003, OutputPer1K: 0.015},
+		"claude-3-haiku-20240307":    {InputPer1K: 0.00025, OutputPer1K: 0.00125},
+		// Groq
+		"llama-3.1-70b-versatile": {InputPer1K: 0.00059, OutputPer1K: 0.00079},
+		"llama-3.1-8b-instant":    {InputPer1K: 0.00005, OutputPer1K: 0.00008},
+		"mixtral-8x7b-32768":      {InputPer1K: 0.00024, OutputPer1K: 0.00024},
+		// Google
+		"gemini-1.5-pro":   {InputPer1K: 0.00125, OutputPer1K: 0.005},
+		"gemini-1.5-flash": {InputPer1K: 0.000075, OutputPer1K: 0.0003},
+		"gemini-2.0-flash": {InputPer1K: 0.0001, OutputPer1K: 0.0004},
+	}
 
 	// Server metrics
 	c.serverStatus = prometheus.NewGaugeVec(
@@ -135,6 +201,9 @@ func NewCollector() *Collector {
 		c.requestDuration,
 		c.requestsInFlight,
 		c.tokensTotal,
+		c.costTotal,
+		c.cacheHits,
+		c.cacheMisses,
 		c.serverStatus,
 		c.circuitBreakerState,
 		c.serverLatency,
@@ -222,4 +291,88 @@ func (c *Collector) DecrementInFlight(server string) {
 // Registry returns the Prometheus registry.
 func (c *Collector) Registry() *prometheus.Registry {
 	return c.registry
+}
+
+// RecordCost records the cost for a request.
+func (c *Collector) RecordCost(server, model, provider string, inputTokens, outputTokens int) {
+	cost := c.CalculateCost(model, inputTokens, outputTokens)
+	if cost > 0 {
+		c.costTotal.WithLabelValues(server, model, provider).Add(cost)
+	}
+}
+
+// CalculateCost calculates the estimated cost for a request.
+func (c *Collector) CalculateCost(model string, inputTokens, outputTokens int) float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	pricing, ok := c.pricing[model]
+	if !ok {
+		// Try to match partial model name (e.g., "gpt-4o-2024-08-06" -> "gpt-4o")
+		for name, p := range c.pricing {
+			if len(model) >= len(name) && model[:len(name)] == name {
+				pricing = p
+				ok = true
+				break
+			}
+		}
+	}
+
+	if !ok {
+		return 0 // Unknown model, no pricing available
+	}
+
+	inputCost := float64(inputTokens) / 1000.0 * pricing.InputPer1K
+	outputCost := float64(outputTokens) / 1000.0 * pricing.OutputPer1K
+	return inputCost + outputCost
+}
+
+// SetModelPricing updates pricing for a model.
+func (c *Collector) SetModelPricing(model string, inputPer1K, outputPer1K float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pricing[model] = ModelPricing{
+		InputPer1K:  inputPer1K,
+		OutputPer1K: outputPer1K,
+	}
+}
+
+// GetModelPricing returns pricing for a model.
+func (c *Collector) GetModelPricing(model string) (ModelPricing, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pricing, ok := c.pricing[model]
+	return pricing, ok
+}
+
+// GetAllPricing returns all model pricing.
+func (c *Collector) GetAllPricing() map[string]ModelPricing {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+	result := make(map[string]ModelPricing, len(c.pricing))
+	for k, v := range c.pricing {
+		result[k] = v
+	}
+	return result
+}
+
+// RecordCacheHit records a cache hit.
+func (c *Collector) RecordCacheHit() {
+	c.cacheHits.Inc()
+}
+
+// RecordCacheMiss records a cache miss.
+func (c *Collector) RecordCacheMiss() {
+	c.cacheMisses.Inc()
+}
+
+// CostSummary holds cost summary information.
+type CostSummary struct {
+	TotalCost     float64
+	CostByModel   map[string]float64
+	CostByServer  map[string]float64
+	TotalTokens   int
+	InputTokens   int
+	OutputTokens  int
 }
