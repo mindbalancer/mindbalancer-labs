@@ -74,6 +74,13 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 - **Global limits** — Default limits for all users
 - **Rate limit headers** — `X-RateLimit-Remaining`, `X-RateLimit-Reset`
 
+### 💾 Response Caching
+- **Automatic caching** — Cache deterministic requests (temperature=0)
+- **LRU eviction** — Least Recently Used cache management
+- **TTL expiration** — 5 minute default TTL
+- **Cache headers** — `X-Cache: HIT` or `X-Cache: MISS`
+- **Admin control** — Enable/disable/clear via mindsql or API
+
 ---
 
 ## Installation
@@ -408,6 +415,37 @@ SHOW API KEYS;              -- API keys (masked)
 SHOW HEALTH STATUS;         -- Server health
 ```
 
+### Cache Management
+
+```sql
+-- View cache status and statistics
+SHOW CACHE STATUS;
+
+-- Enable caching
+CACHE ENABLE;
+
+-- Disable caching
+CACHE DISABLE;
+
+-- Clear all cached responses
+CACHE CLEAR;
+```
+
+**Cache Status Output:**
+```
++------------------+------------------+
+| Variable         | Value            |
++------------------+------------------+
+| status           | enabled          |
+| hits             | 1523             |
+| misses           | 342              |
+| hit_rate         | 0.82             |
+| evictions        | 12               |
+| size_bytes       | 2451678          |
+| item_count       | 156              |
++------------------+------------------+
+```
+
 ---
 
 ## HTTP Admin API
@@ -422,6 +460,9 @@ SHOW HEALTH STATUS;         -- Server health
 | GET | `/api/stats` | Get statistics |
 | GET | `/api/health` | Health status |
 | POST | `/api/reload` | Reload configuration |
+| GET | `/api/cache` | Cache status & statistics |
+| PUT | `/api/cache` | Enable/disable cache |
+| POST | `/api/cache/clear` | Clear all cached responses |
 | GET | `/` | Web Dashboard |
 
 ### Example: Add Server via API
@@ -440,6 +481,37 @@ curl -X POST http://localhost:6033/api/servers \
 
 # Reload to apply
 curl -X POST http://localhost:6033/api/reload
+```
+
+### Example: Cache Management via API
+
+```bash
+# Get cache status
+curl http://localhost:6033/api/cache
+
+# Response:
+# {
+#   "enabled": true,
+#   "hits": 1523,
+#   "misses": 342,
+#   "hit_rate": 0.816,
+#   "evictions": 12,
+#   "size_bytes": 2451678,
+#   "item_count": 156
+# }
+
+# Disable cache
+curl -X PUT http://localhost:6033/api/cache \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+
+# Enable cache
+curl -X PUT http://localhost:6033/api/cache \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+
+# Clear cache
+curl -X POST http://localhost:6033/api/cache/clear
 ```
 
 ---
@@ -494,11 +566,16 @@ Import the pre-built dashboard from `grafana/mindbalancer-dashboard.json`
 - [x] Health checks and failover
 - [x] Rate limiting
 - [x] Web UI Dashboard
-- [ ] Response caching
+- [x] Response caching (with enable/disable control)
+- [x] Cost tracking metrics (per model/provider)
+- [x] Retry with exponential backoff
+- [x] API key encryption (AES-256)
+- [x] Connection pooling
+- [x] Graceful shutdown
+- [x] Hot config reload (SIGHUP)
 - [ ] Semantic caching (embedding-based)
 - [ ] Cluster mode (multi-node)
 - [ ] Request queuing
-- [ ] Cost tracking and budgets
 
 ---
 

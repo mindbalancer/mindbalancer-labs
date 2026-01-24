@@ -58,6 +58,11 @@ func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer
 	}
 }
 
+// GetCache returns the cache instance for external management.
+func (p *Proxy) GetCache() *cache.Cache {
+	return p.cache
+}
+
 // Handler returns the HTTP handler for the proxy.
 func (p *Proxy) Handler() http.Handler {
 	mux := http.NewServeMux()

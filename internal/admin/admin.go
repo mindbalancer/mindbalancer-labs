@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mindbalancer/mindbalancer/internal/balancer"
+	"github.com/mindbalancer/mindbalancer/internal/cache"
 	"github.com/mindbalancer/mindbalancer/internal/circuit"
 	"github.com/mindbalancer/mindbalancer/internal/config"
 	"github.com/mindbalancer/mindbalancer/internal/health"
@@ -25,6 +26,7 @@ type Admin struct {
 	health   *health.Checker
 	circuits *circuit.Manager
 	router   *router.Router
+	cache    *cache.Cache
 }
 
 // NewAdmin creates a new admin interface.
@@ -37,6 +39,11 @@ func NewAdmin(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer
 		circuits: cm,
 		router:   rtr,
 	}
+}
+
+// SetCache sets the cache instance for admin management.
+func (a *Admin) SetCache(c *cache.Cache) {
+	a.cache = c
 }
 
 // Handler returns the HTTP handler for admin interface.
@@ -71,6 +78,10 @@ func (a *Admin) Handler() http.Handler {
 
 	// Operations
 	mux.HandleFunc("/api/reload", a.handleReload)
+
+	// Cache management
+	mux.HandleFunc("/api/cache", a.handleCache)
+	mux.HandleFunc("/api/cache/clear", a.handleCacheClear)
 
 	// Web UI Dashboard
 	mux.HandleFunc("/", a.handleDashboard)
@@ -505,6 +516,66 @@ func (a *Admin) handleReload(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, map[string]string{"status": "reloaded"})
 }
 
+// Cache handlers
+
+func (a *Admin) handleCache(w http.ResponseWriter, r *http.Request) {
+	if a.cache == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "Cache not initialized")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Get cache status and stats
+		stats := a.cache.Stats()
+		response := map[string]any{
+			"enabled":    a.cache.IsEnabled(),
+			"hits":       stats.Hits,
+			"misses":     stats.Misses,
+			"hit_rate":   a.cache.HitRate(),
+			"evictions":  stats.Evictions,
+			"size_bytes": stats.Size,
+			"item_count": stats.ItemCount,
+		}
+		a.writeJSON(w, response)
+
+	case http.MethodPut, http.MethodPost:
+		// Enable/disable cache
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			a.writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		a.cache.SetEnabled(req.Enabled)
+		status := "disabled"
+		if req.Enabled {
+			status = "enabled"
+		}
+		a.writeJSON(w, map[string]string{"status": "ok", "cache": status})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Admin) handleCacheClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if a.cache == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "Cache not initialized")
+		return
+	}
+
+	a.cache.Clear()
+	a.writeJSON(w, map[string]string{"status": "ok", "message": "Cache cleared"})
+}
+
 // Execute executes an admin command (for mindsql compatibility).
 func (a *Admin) Execute(ctx context.Context, command string) (string, error) {
 	command = strings.TrimSpace(command)
@@ -533,6 +604,14 @@ func (a *Admin) Execute(ctx context.Context, command string) (string, error) {
 		return a.executeShowAPIKeys(ctx)
 	case strings.HasPrefix(upper, "SHOW HEALTH STATUS"):
 		return a.executeShowHealthStatus()
+	case strings.HasPrefix(upper, "SHOW CACHE STATUS"):
+		return a.executeShowCacheStatus()
+	case strings.HasPrefix(upper, "CACHE ENABLE"):
+		return a.executeCacheEnable(true)
+	case strings.HasPrefix(upper, "CACHE DISABLE"):
+		return a.executeCacheEnable(false)
+	case strings.HasPrefix(upper, "CACHE CLEAR"):
+		return a.executeCacheClear()
 	case strings.HasPrefix(upper, "LOAD AI SERVERS TO RUNTIME"):
 		return a.executeLoadServers(ctx)
 	case strings.HasPrefix(upper, "LOAD AI ROUTING RULES TO RUNTIME"):
@@ -963,6 +1042,55 @@ func (a *Admin) executeSet(command string) (string, error) {
 	}
 
 	return fmt.Sprintf("Query OK, %s set to %s\n", name, value), nil
+}
+
+func (a *Admin) executeShowCacheStatus() (string, error) {
+	if a.cache == nil {
+		return "Cache not initialized\n", nil
+	}
+
+	stats := a.cache.Stats()
+	enabled := "disabled"
+	if a.cache.IsEnabled() {
+		enabled = "enabled"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("+------------------+------------------+\n")
+	sb.WriteString("| Variable         | Value            |\n")
+	sb.WriteString("+------------------+------------------+\n")
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16s |\n", "status", enabled))
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "hits", stats.Hits))
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "misses", stats.Misses))
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16.2f |\n", "hit_rate", a.cache.HitRate()))
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "evictions", stats.Evictions))
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "size_bytes", stats.Size))
+	sb.WriteString(fmt.Sprintf("| %-16s | %-16d |\n", "item_count", stats.ItemCount))
+	sb.WriteString("+------------------+------------------+\n")
+
+	return sb.String(), nil
+}
+
+func (a *Admin) executeCacheEnable(enable bool) (string, error) {
+	if a.cache == nil {
+		return "", fmt.Errorf("cache not initialized")
+	}
+
+	a.cache.SetEnabled(enable)
+	status := "disabled"
+	if enable {
+		status = "enabled"
+	}
+	return fmt.Sprintf("Query OK, cache %s\n", status), nil
+}
+
+func (a *Admin) executeCacheClear() (string, error) {
+	if a.cache == nil {
+		return "", fmt.Errorf("cache not initialized")
+	}
+
+	a.cache.Clear()
+	return "Query OK, cache cleared\n", nil
 }
 
 func (a *Admin) writeJSON(w http.ResponseWriter, v any) {

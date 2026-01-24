@@ -119,6 +119,9 @@ func main() {
 	// Initialize proxy
 	proxyHandler := proxy.NewProxy(cfg, store, bal, rtr, metricsCollector, rateLimiter)
 
+	// Share cache with admin for management
+	adminHandler.SetCache(proxyHandler.GetCache())
+
 	// Load initial data
 	ctx := context.Background()
 	if err := bal.LoadServers(ctx); err != nil {
