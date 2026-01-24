@@ -23,6 +23,27 @@ type ChatCompletionRequest struct {
 	ToolChoice       any             `json:"tool_choice,omitempty"`
 	ResponseFormat   *ResponseFormat `json:"response_format,omitempty"`
 	Seed             *int            `json:"seed,omitempty"`
+
+	// Referee Mode - sends request to multiple providers and synthesizes responses
+	RefereeMode *RefereeConfig `json:"referee_mode,omitempty"`
+}
+
+// RefereeConfig configures the referee mode for consensus-based responses.
+type RefereeConfig struct {
+	Enabled      bool     `json:"enabled"`                 // Enable referee mode
+	RefereeModel string   `json:"referee_model"`           // Model to use as referee (e.g., "gpt-4o", "claude-3-opus")
+	Providers    []string `json:"providers,omitempty"`     // Provider types to query (e.g., ["openai", "anthropic"]). Empty = use all available
+	MinResponses int      `json:"min_responses,omitempty"` // Minimum successful responses required (default: 2)
+	TimeoutMS    int      `json:"timeout_ms,omitempty"`    // Per-provider timeout in ms (default: from config)
+}
+
+// RefereeResponse contains metadata about referee mode execution.
+type RefereeResponse struct {
+	ProvidersQueried  int      `json:"providers_queried"`   // Number of providers queried
+	SuccessfulResponses int    `json:"successful_responses"` // Number of successful responses
+	FailedProviders   []string `json:"failed_providers,omitempty"` // List of failed provider names
+	RefereeModel      string   `json:"referee_model"`       // Model used as referee
+	SynthesisLatencyMS int64   `json:"synthesis_latency_ms"` // Time taken for synthesis
 }
 
 // Message represents a chat message.
@@ -81,13 +102,14 @@ type ResponseFormat struct {
 
 // ChatCompletionResponse represents a chat completion response.
 type ChatCompletionResponse struct {
-	ID                string   `json:"id"`
-	Object            string   `json:"object"`
-	Created           int64    `json:"created"`
-	Model             string   `json:"model"`
-	Choices           []Choice `json:"choices"`
-	Usage             *Usage   `json:"usage,omitempty"`
-	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
+	ID                string           `json:"id"`
+	Object            string           `json:"object"`
+	Created           int64            `json:"created"`
+	Model             string           `json:"model"`
+	Choices           []Choice         `json:"choices"`
+	Usage             *Usage           `json:"usage,omitempty"`
+	SystemFingerprint string           `json:"system_fingerprint,omitempty"`
+	RefereeInfo       *RefereeResponse `json:"referee_info,omitempty"` // Referee mode metadata
 }
 
 // Choice represents a completion choice.

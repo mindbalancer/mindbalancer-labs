@@ -94,6 +94,13 @@ type Config struct {
 
 	// Model-specific timeouts (model name -> timeout in ms)
 	ModelTimeouts map[string]int
+
+	// Referee Mode
+	RefereeEnabled      bool   // Enable referee mode globally
+	RefereeMinResponses int    // Minimum successful responses required (default: 2)
+	RefereeTimeoutMS    int    // Per-provider timeout in ms (default: 60000)
+	RefereeMaxProviders int    // Maximum providers to query (default: 4)
+	RefereeDefaultModel string // Default referee model if not specified in request
 }
 
 // ModelTimeout represents a model-specific timeout configuration.
@@ -172,6 +179,13 @@ func DefaultConfig() *Config {
 		CacheMaxItemSizeKB:      2048,            // 2MB per item
 		CacheCompressionEnabled: true,
 		CacheEmbeddingsTTLHours: 24,              // 24 hours for embeddings
+
+		// Referee Mode defaults
+		RefereeEnabled:      true,
+		RefereeMinResponses: 2,       // At least 2 successful responses
+		RefereeTimeoutMS:    60000,   // 60 seconds per provider
+		RefereeMaxProviders: 4,       // Query up to 4 providers
+		RefereeDefaultModel: "gpt-4o", // Default referee model
 	}
 }
 
@@ -283,6 +297,13 @@ func Load(path string) (*Config, error) {
 	cfg.CacheCompressionEnabled = section.Key("cache_compression_enabled").MustBool(cfg.CacheCompressionEnabled)
 	cfg.CacheEmbeddingsTTLHours = section.Key("cache_embeddings_ttl_hours").MustInt(cfg.CacheEmbeddingsTTLHours)
 
+	// Referee Mode
+	cfg.RefereeEnabled = section.Key("referee_enabled").MustBool(cfg.RefereeEnabled)
+	cfg.RefereeMinResponses = section.Key("referee_min_responses").MustInt(cfg.RefereeMinResponses)
+	cfg.RefereeTimeoutMS = section.Key("referee_timeout_ms").MustInt(cfg.RefereeTimeoutMS)
+	cfg.RefereeMaxProviders = section.Key("referee_max_providers").MustInt(cfg.RefereeMaxProviders)
+	cfg.RefereeDefaultModel = section.Key("referee_default_model").MustString(cfg.RefereeDefaultModel)
+
 	return cfg, nil
 }
 
@@ -390,6 +411,11 @@ func (c *Config) GetAllVariables() map[string]string {
 		"cache_max_item_size_kb":      strconv.Itoa(c.CacheMaxItemSizeKB),
 		"cache_compression_enabled":   strconv.FormatBool(c.CacheCompressionEnabled),
 		"cache_embeddings_ttl_hours":  strconv.Itoa(c.CacheEmbeddingsTTLHours),
+		"referee_enabled":             strconv.FormatBool(c.RefereeEnabled),
+		"referee_min_responses":       strconv.Itoa(c.RefereeMinResponses),
+		"referee_timeout_ms":          strconv.Itoa(c.RefereeTimeoutMS),
+		"referee_max_providers":       strconv.Itoa(c.RefereeMaxProviders),
+		"referee_default_model":       c.RefereeDefaultModel,
 	}
 }
 
@@ -440,6 +466,13 @@ func (c *Config) DBPath() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return filepath.Join(c.DataDir, "mindbalancer.db")
+}
+
+// RefereeTimeout returns the referee per-provider timeout as a Duration.
+func (c *Config) RefereeTimeout() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return time.Duration(c.RefereeTimeoutMS) * time.Millisecond
 }
 
 // GetModelTimeout returns the timeout for a specific model.
