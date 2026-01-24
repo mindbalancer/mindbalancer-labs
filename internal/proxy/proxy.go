@@ -16,6 +16,7 @@ import (
 
 	"github.com/mindbalancer/mindbalancer/api/openai"
 	"github.com/mindbalancer/mindbalancer/internal/balancer"
+	"github.com/mindbalancer/mindbalancer/internal/cache"
 	"github.com/mindbalancer/mindbalancer/internal/config"
 	"github.com/mindbalancer/mindbalancer/internal/metrics"
 	"github.com/mindbalancer/mindbalancer/internal/provider"
@@ -33,10 +34,19 @@ type Proxy struct {
 	router    *router.Router
 	metrics   *metrics.Collector
 	ratelimit *ratelimit.Limiter
+	cache     *cache.Cache
 }
 
 // NewProxy creates a new proxy.
 func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, rtr *router.Router, met *metrics.Collector, rl *ratelimit.Limiter) *Proxy {
+	// Initialize cache with default config
+	cacheInstance := cache.NewCache(cache.Config{
+		Enabled:     true,
+		MaxSize:     1000,
+		TTL:         5 * time.Minute,
+		MaxItemSize: 1024 * 1024, // 1MB
+	})
+
 	return &Proxy{
 		config:    cfg,
 		storage:   store,
@@ -44,6 +54,7 @@ func NewProxy(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer
 		router:    rtr,
 		metrics:   met,
 		ratelimit: rl,
+		cache:     cacheInstance,
 	}
 }
 
@@ -158,6 +169,44 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, requestID, username string, startTime time.Time) {
+	// Check if request is cacheable (temperature = 0 or nil means deterministic output)
+	cacheable := p.cache != nil && (req.Temperature == nil || *req.Temperature == 0)
+	var cacheKey string
+
+	if cacheable {
+		// Generate cache key from request
+		cacheKey = cache.GenerateKey(req.Model, req.Messages, req.Temperature, req.MaxTokens)
+
+		// Check cache
+		if cachedData, found := p.cache.Get(cacheKey); found {
+			// Cache HIT!
+			latency := time.Since(startTime)
+			
+			// Record cache hit in metrics
+			if p.metrics != nil {
+				p.metrics.RecordCacheHit()
+			}
+
+			// Log cache hit
+			p.logRequest(requestID, username, "cache", req.Model, "/v1/chat/completions", 0, 0, latency, 0, http.StatusOK, "cache_hit", false)
+
+			// Release server since we didn't use it
+			p.balancer.ReleaseServer(server.Name, 0, true)
+
+			// Return cached response
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Request-ID", requestID)
+			w.Header().Set("X-Cache", "HIT")
+			w.Write(cachedData)
+			return
+		}
+
+		// Record cache miss
+		if p.metrics != nil {
+			p.metrics.RecordCacheMiss()
+		}
+	}
+
 	// Get model-specific timeout
 	timeout := p.config.GetModelTimeout(req.Model)
 	
@@ -259,9 +308,22 @@ func (p *Proxy) handleNonStreamingChat(ctx context.Context, w http.ResponseWrite
 		w.Header().Set("X-Retry-Count", strconv.Itoa(attemptCount-1))
 	}
 
+	// Serialize response
+	respBytes, err := json.Marshal(resp)
+	if err != nil {
+		p.writeError(w, http.StatusInternalServerError, "internal_error", "Failed to serialize response")
+		return
+	}
+
+	// Store in cache if cacheable
+	if cacheable && cacheKey != "" {
+		p.cache.Set(cacheKey, respBytes, req.Model)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", requestID)
-	json.NewEncoder(w).Encode(resp)
+	w.Header().Set("X-Cache", "MISS")
+	w.Write(respBytes)
 }
 
 func (p *Proxy) handleStreamingChat(ctx context.Context, w http.ResponseWriter, req *openai.ChatCompletionRequest, prov provider.Provider, server *storage.Server, requestID, username string, startTime time.Time) {
