@@ -20,24 +20,28 @@ import (
 
 // Admin provides administrative functions.
 type Admin struct {
-	config   *config.Config
-	storage  *storage.Storage
-	balancer *balancer.Balancer
-	health   *health.Checker
-	circuits *circuit.Manager
-	router   *router.Router
-	cache    *cache.Cache
+	config        *config.Config
+	storage       *storage.Storage
+	balancer      *balancer.Balancer
+	health        *health.Checker
+	circuits      *circuit.Manager
+	router        *router.Router
+	cache         *cache.Cache
+	sessions      *SessionManager
+	authenticator *Authenticator
 }
 
 // NewAdmin creates a new admin interface.
 func NewAdmin(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, hc *health.Checker, cm *circuit.Manager, rtr *router.Router) *Admin {
 	return &Admin{
-		config:   cfg,
-		storage:  store,
-		balancer: bal,
-		health:   hc,
-		circuits: cm,
-		router:   rtr,
+		config:        cfg,
+		storage:       store,
+		balancer:      bal,
+		health:        hc,
+		circuits:      cm,
+		router:        rtr,
+		sessions:      NewSessionManager(),
+		authenticator: NewAuthenticator(cfg.AdminUsername, cfg.AdminPasswordHash),
 	}
 }
 
@@ -50,48 +54,79 @@ func (a *Admin) SetCache(c *cache.Cache) {
 func (a *Admin) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Server management
-	mux.HandleFunc("/api/servers", a.handleServers)
-	mux.HandleFunc("/api/servers/", a.handleServerByName)
-
-	// User management
-	mux.HandleFunc("/api/users", a.handleUsers)
-	mux.HandleFunc("/api/users/", a.handleUserByName)
-
-	// Routing rules
-	mux.HandleFunc("/api/rules", a.handleRules)
-	mux.HandleFunc("/api/routing-rules", a.handleRules)
-
-	// Hostgroups
-	mux.HandleFunc("/api/hostgroups", a.handleHostgroups)
-
-	// Variables
-	mux.HandleFunc("/api/variables", a.handleVariables)
-
-	// Stats
+	// Public API endpoints (for monitoring)
 	mux.HandleFunc("/api/stats", a.handleStats)
 	mux.HandleFunc("/api/stats/servers", a.handleServerStats)
 	mux.HandleFunc("/api/stats/requests", a.handleRequestStats)
-
-	// Health
 	mux.HandleFunc("/api/health", a.handleHealthStatus)
-
-	// Operations
-	mux.HandleFunc("/api/reload", a.handleReload)
-
-	// Cache management
 	mux.HandleFunc("/api/cache", a.handleCache)
-	mux.HandleFunc("/api/cache/clear", a.handleCacheClear)
 
-	// Web UI Dashboard
-	mux.HandleFunc("/", a.handleDashboard)
+	// Protected API endpoints (require authentication)
+	mux.Handle("/api/servers", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleServers)))
+	mux.Handle("/api/servers/", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleServerByName)))
+	mux.Handle("/api/users", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleUsers)))
+	mux.Handle("/api/users/", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleUserByName)))
+	mux.Handle("/api/rules", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleRules)))
+	mux.Handle("/api/routing-rules", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleRules)))
+	mux.Handle("/api/hostgroups", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleHostgroups)))
+	mux.Handle("/api/variables", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleVariables)))
+	mux.Handle("/api/reload", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleReload)))
+	mux.Handle("/api/cache/clear", a.sessions.AuthAPIMiddleware(http.HandlerFunc(a.handleCacheClear)))
+
+	// Authentication endpoints
+	mux.HandleFunc("/admin/login", a.handleLogin)
+	mux.HandleFunc("/admin/logout", a.handleLogout)
+
+	// Static files
+	mux.HandleFunc("/static/", a.handleStatic)
+
+	// Web UI endpoints
+	mux.HandleFunc("/monitoring", a.handleMonitoring)
+	mux.HandleFunc("/admin", a.handleAdminPanel)
+	mux.HandleFunc("/admin/", a.handleAdminPanel)
+
+	// Root redirects to monitoring
+	mux.HandleFunc("/", a.handleRoot)
 
 	return mux
 }
 
-// handleDashboard serves the web UI dashboard.
-func (a *Admin) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	// Enable CORS for API calls from dashboard
+// handleStatic serves static files from web/static directory.
+func (a *Admin) handleStatic(w http.ResponseWriter, r *http.Request) {
+	// Get the file path
+	filePath := strings.TrimPrefix(r.URL.Path, "/static/")
+	
+	// Security: prevent directory traversal
+	if strings.Contains(filePath, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	
+	// Serve from web/static directory
+	fullPath := "web/static/" + filePath
+	
+	// Set content type based on extension
+	if strings.HasSuffix(filePath, ".png") {
+		w.Header().Set("Content-Type", "image/png")
+	} else if strings.HasSuffix(filePath, ".jpg") || strings.HasSuffix(filePath, ".jpeg") {
+		w.Header().Set("Content-Type", "image/jpeg")
+	} else if strings.HasSuffix(filePath, ".svg") {
+		w.Header().Set("Content-Type", "image/svg+xml")
+	} else if strings.HasSuffix(filePath, ".css") {
+		w.Header().Set("Content-Type", "text/css")
+	} else if strings.HasSuffix(filePath, ".js") {
+		w.Header().Set("Content-Type", "application/javascript")
+	}
+	
+	// Cache for 1 hour
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	
+	http.ServeFile(w, r, fullPath)
+}
+
+// handleRoot redirects to monitoring dashboard.
+func (a *Admin) handleRoot(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for API calls
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -107,9 +142,124 @@ func (a *Admin) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve embedded dashboard HTML
+	// Redirect root to monitoring
+	if r.URL.Path == "/" {
+		http.Redirect(w, r, "/monitoring", http.StatusFound)
+		return
+	}
+
+	// 404 for other paths
+	a.writeError(w, http.StatusNotFound, "Not found")
+}
+
+// handleMonitoring serves the public monitoring dashboard.
+func (a *Admin) handleMonitoring(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(dashboardHTML))
+	w.Write([]byte(monitoringHTML))
+}
+
+// handleAdminPanel serves the protected admin panel.
+func (a *Admin) handleAdminPanel(w http.ResponseWriter, r *http.Request) {
+	// Check if path is login or logout (handled separately)
+	if strings.HasPrefix(r.URL.Path, "/admin/login") || strings.HasPrefix(r.URL.Path, "/admin/logout") {
+		return
+	}
+
+	// Check authentication
+	session := a.sessions.GetSessionFromRequest(r)
+	if session == nil {
+		http.Redirect(w, r, "/admin/login", http.StatusFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(adminPanelHTML))
+}
+
+// handleLogin handles the login page and authentication.
+func (a *Admin) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		// Check if already logged in
+		if session := a.sessions.GetSessionFromRequest(r); session != nil {
+			http.Redirect(w, r, "/admin", http.StatusFound)
+			return
+		}
+		// Serve login page
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(loginHTML))
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Parse form or JSON
+		var username, password string
+
+		contentType := r.Header.Get("Content-Type")
+		if strings.Contains(contentType, "application/json") {
+			var creds struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+				a.writeError(w, http.StatusBadRequest, "Invalid request body")
+				return
+			}
+			username = creds.Username
+			password = creds.Password
+		} else {
+			if err := r.ParseForm(); err != nil {
+				a.writeError(w, http.StatusBadRequest, "Invalid form data")
+				return
+			}
+			username = r.FormValue("username")
+			password = r.FormValue("password")
+		}
+
+		// Authenticate
+		if !a.authenticator.Authenticate(username, password) {
+			// For form submission, redirect back to login with error
+			if !strings.Contains(contentType, "application/json") {
+				http.Redirect(w, r, "/admin/login?error=invalid", http.StatusFound)
+				return
+			}
+			a.writeError(w, http.StatusUnauthorized, "Invalid credentials")
+			return
+		}
+
+		// Create session
+		session, err := a.sessions.CreateSession(username)
+		if err != nil {
+			a.writeError(w, http.StatusInternalServerError, "Failed to create session")
+			return
+		}
+
+		// Set cookie
+		a.sessions.SetSessionCookie(w, session)
+
+		// Redirect or respond with success
+		if !strings.Contains(contentType, "application/json") {
+			http.Redirect(w, r, "/admin", http.StatusFound)
+			return
+		}
+		a.writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+// handleLogout handles user logout.
+func (a *Admin) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Get and delete session
+	if session := a.sessions.GetSessionFromRequest(r); session != nil {
+		a.sessions.DeleteSession(session.ID)
+	}
+
+	// Clear cookie
+	a.sessions.ClearSessionCookie(w)
+
+	// Redirect to login
+	http.Redirect(w, r, "/admin/login", http.StatusFound)
 }
 
 // Server handlers
