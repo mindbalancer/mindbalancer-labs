@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,10 +36,22 @@ func main() {
 	// Parse flags
 	configPath := flag.String("config", "", "Path to configuration file")
 	showVersion := flag.Bool("version", false, "Show version information")
+	hashPassword := flag.String("hash-password", "", "Generate a bcrypt hash for the given admin password and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("MindBalancer %s (built %s)\n", Version, BuildTime)
+		os.Exit(0)
+	}
+
+	if *hashPassword != "" {
+		hash, err := admin.HashPassword(*hashPassword)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to hash password: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(hash)
+		fmt.Fprintln(os.Stderr, "Set this as admin_password_hash in your config file.")
 		os.Exit(0)
 	}
 
@@ -146,14 +157,21 @@ func main() {
 	}
 
 	adminServer := &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", cfg.AdminBindAddress, cfg.AdminPort+1),
+		Addr:         fmt.Sprintf("%s:%d", cfg.AdminBindAddress, cfg.AdminHTTPPort),
 		Handler:      adminHandler.Handler(),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 
-	// MySQL protocol server for mindsql
-	mysqlServer := protocol.NewMySQLServer(adminHandler)
+	// MySQL protocol server for mindsql. Prefer an explicit plaintext credential
+	// (admin_password); otherwise fall back to the auto-generated bootstrap
+	// password shared with the HTTP admin. If neither exists, the MySQL server
+	// accepts loopback connections only.
+	mysqlPassword := cfg.AdminPassword
+	if mysqlPassword == "" {
+		mysqlPassword = adminHandler.GeneratedPassword()
+	}
+	mysqlServer := protocol.NewMySQLServer(adminHandler, cfg.AdminUsername, mysqlPassword)
 
 	// Metrics server
 	var metricsServer *http.Server
@@ -200,9 +218,6 @@ func main() {
 		}()
 	}
 
-	// Track active requests for graceful shutdown
-	var activeRequests int64
-
 	// Wait for shutdown or reload signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -239,7 +254,7 @@ func main() {
 
 	// Stop accepting new connections first
 	healthChecker.Stop()
-	
+
 	// Create shutdown context with timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -258,15 +273,15 @@ func main() {
 	// Wait for active requests to complete
 	drainTicker := time.NewTicker(100 * time.Millisecond)
 	drainTimeout := time.After(25 * time.Second)
-	
+
 drainLoop:
 	for {
 		select {
 		case <-drainTimeout:
-			log.Printf("Drain timeout - forcing shutdown with %d active requests", atomic.LoadInt64(&activeRequests))
+			log.Printf("Drain timeout - forcing shutdown with %d active requests", proxyHandler.ActiveRequests())
 			break drainLoop
 		case <-drainTicker.C:
-			active := atomic.LoadInt64(&activeRequests)
+			active := proxyHandler.ActiveRequests()
 			if active == 0 {
 				log.Println("All requests drained")
 				break drainLoop

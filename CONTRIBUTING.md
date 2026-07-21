@@ -41,7 +41,7 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.20 or later
 - SQLite3
 - Make
 
@@ -49,11 +49,11 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ```bash
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/mindbalancer.git
-cd mindbalancer
+git clone https://github.com/YOUR_USERNAME/mindbalancer-labs.git
+cd mindbalancer-labs
 
 # Add upstream remote
-git remote add upstream https://github.com/mindbalancer/mindbalancer.git
+git remote add upstream https://github.com/mindbalancer/mindbalancer-labs.git
 
 # Install dependencies and dev tools
 make dev-setup
@@ -204,9 +204,8 @@ Releases are managed by maintainers:
 
 ## Getting Help
 
-- 💬 [Discord](https://discord.gg/mindbalancer)
-- 📧 [Email](mailto:dev@mindbalancer.io)
-- 🐛 [Issues](https://github.com/mindbalancer/mindbalancer/issues)
+- 🐛 [Issues](https://github.com/mindbalancer/mindbalancer-labs/issues)
+- 📧 [Email](mailto:burak1607@gmail.com)
 
 ## Recognition
 

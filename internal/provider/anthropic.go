@@ -45,7 +45,7 @@ type CacheControl struct {
 
 // SystemBlock represents a system message block with optional cache control.
 type SystemBlock struct {
-	Type         string        `json:"type"`          // "text"
+	Type         string        `json:"type"` // "text"
 	Text         string        `json:"text"`
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }

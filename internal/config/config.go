@@ -19,7 +19,8 @@ type Config struct {
 
 	// Network
 	AdminBindAddress string
-	AdminPort        int
+	AdminPort        int // MySQL admin protocol port (mindsql)
+	AdminHTTPPort    int // Admin HTTP dashboard + REST API port
 	ProxyBindAddress string
 	ProxyPort        int
 
@@ -69,9 +70,10 @@ type Config struct {
 	PrometheusPath    string
 
 	// Security
-	AdminUsername        string
-	AdminPasswordHash    string
-	APIKeyEncryptionKey  string
+	AdminUsername       string
+	AdminPasswordHash   string // bcrypt hash for the HTTP admin dashboard
+	AdminPassword       string // plaintext credential for the MySQL admin protocol (mindsql)
+	APIKeyEncryptionKey string
 
 	// TLS
 	TLSEnabled  bool
@@ -80,12 +82,12 @@ type Config struct {
 
 	// Cache
 	CacheEnabled            bool
-	CacheMaxSize            int   // Maximum number of cached items
-	CacheMaxMemoryMB        int   // Maximum memory usage in MB
-	CacheTTLSeconds         int   // Default TTL in seconds
-	CacheMaxItemSizeKB      int   // Maximum size of a single item in KB
-	CacheCompressionEnabled bool  // Enable compression
-	CacheEmbeddingsTTLHours int   // TTL for embeddings in hours
+	CacheMaxSize            int  // Maximum number of cached items
+	CacheMaxMemoryMB        int  // Maximum memory usage in MB
+	CacheTTLSeconds         int  // Default TTL in seconds
+	CacheMaxItemSizeKB      int  // Maximum size of a single item in KB
+	CacheCompressionEnabled bool // Enable compression
+	CacheEmbeddingsTTLHours int  // TTL for embeddings in hours
 
 	// Cluster
 	ClusterEnabled bool
@@ -112,10 +114,13 @@ type ModelTimeout struct {
 // DefaultConfig returns a configuration with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		AdminBindAddress: "0.0.0.0",
+		// Admin plane binds to loopback by default (like ProxySQL). Exposing the
+		// admin/MySQL ports on 0.0.0.0 requires a configured credential.
+		AdminBindAddress: "127.0.0.1",
 		AdminPort:        6032,
+		AdminHTTPPort:    6033,
 		ProxyBindAddress: "0.0.0.0",
-		ProxyPort:        6033,
+		ProxyPort:        6034,
 
 		DataDir: "/var/lib/mindbalancer",
 
@@ -173,18 +178,18 @@ func DefaultConfig() *Config {
 
 		// Cache defaults
 		CacheEnabled:            true,
-		CacheMaxSize:            10000,           // 10k items total
-		CacheMaxMemoryMB:        512,             // 512MB
-		CacheTTLSeconds:         300,             // 5 minutes
-		CacheMaxItemSizeKB:      2048,            // 2MB per item
+		CacheMaxSize:            10000, // 10k items total
+		CacheMaxMemoryMB:        512,   // 512MB
+		CacheTTLSeconds:         300,   // 5 minutes
+		CacheMaxItemSizeKB:      2048,  // 2MB per item
 		CacheCompressionEnabled: true,
-		CacheEmbeddingsTTLHours: 24,              // 24 hours for embeddings
+		CacheEmbeddingsTTLHours: 24, // 24 hours for embeddings
 
 		// Referee Mode defaults
 		RefereeEnabled:      true,
-		RefereeMinResponses: 2,       // At least 2 successful responses
-		RefereeTimeoutMS:    60000,   // 60 seconds per provider
-		RefereeMaxProviders: 4,       // Query up to 4 providers
+		RefereeMinResponses: 2,        // At least 2 successful responses
+		RefereeTimeoutMS:    60000,    // 60 seconds per provider
+		RefereeMaxProviders: 4,        // Query up to 4 providers
 		RefereeDefaultModel: "gpt-4o", // Default referee model
 	}
 }
@@ -222,6 +227,7 @@ func Load(path string) (*Config, error) {
 	// Network
 	cfg.AdminBindAddress = section.Key("admin_bind_address").MustString(cfg.AdminBindAddress)
 	cfg.AdminPort = section.Key("admin_port").MustInt(cfg.AdminPort)
+	cfg.AdminHTTPPort = section.Key("admin_http_port").MustInt(cfg.AdminHTTPPort)
 	cfg.ProxyBindAddress = section.Key("proxy_bind_address").MustString(cfg.ProxyBindAddress)
 	cfg.ProxyPort = section.Key("proxy_port").MustInt(cfg.ProxyPort)
 
@@ -273,6 +279,7 @@ func Load(path string) (*Config, error) {
 	// Security
 	cfg.AdminUsername = section.Key("admin_username").MustString(cfg.AdminUsername)
 	cfg.AdminPasswordHash = section.Key("admin_password_hash").MustString(cfg.AdminPasswordHash)
+	cfg.AdminPassword = section.Key("admin_password").MustString(cfg.AdminPassword)
 	cfg.APIKeyEncryptionKey = section.Key("api_key_encryption_key").MustString(cfg.APIKeyEncryptionKey)
 
 	// TLS
@@ -317,6 +324,8 @@ func (c *Config) Get(name string) (string, bool) {
 		return c.AdminBindAddress, true
 	case "admin_port":
 		return strconv.Itoa(c.AdminPort), true
+	case "admin_http_port":
+		return strconv.Itoa(c.AdminHTTPPort), true
 	case "proxy_bind_address":
 		return c.ProxyBindAddress, true
 	case "proxy_port":
@@ -389,33 +398,33 @@ func (c *Config) GetAllVariables() map[string]string {
 	defer c.mu.RUnlock()
 
 	return map[string]string{
-		"admin_bind_address":          c.AdminBindAddress,
-		"admin_port":                  strconv.Itoa(c.AdminPort),
-		"proxy_bind_address":          c.ProxyBindAddress,
-		"proxy_port":                  strconv.Itoa(c.ProxyPort),
-		"data_dir":                    c.DataDir,
-		"log_level":                   c.LogLevel,
-		"log_format":                  c.LogFormat,
-		"failover_enabled":            strconv.FormatBool(c.FailoverEnabled),
-		"max_retries":                 strconv.Itoa(c.MaxRetries),
-		"circuit_breaker_enabled":     strconv.FormatBool(c.CircuitBreakerEnabled),
-		"circuit_breaker_threshold":   strconv.Itoa(c.CircuitBreakerThreshold),
-		"health_check_enabled":        strconv.FormatBool(c.HealthCheckEnabled),
-		"health_check_interval_ms":    strconv.Itoa(c.HealthCheckIntervalMS),
-		"prometheus_enabled":          strconv.FormatBool(c.PrometheusEnabled),
-		"prometheus_port":             strconv.Itoa(c.PrometheusPort),
-		"cache_enabled":               strconv.FormatBool(c.CacheEnabled),
-		"cache_max_size":              strconv.Itoa(c.CacheMaxSize),
-		"cache_max_memory_mb":         strconv.Itoa(c.CacheMaxMemoryMB),
-		"cache_ttl_seconds":           strconv.Itoa(c.CacheTTLSeconds),
-		"cache_max_item_size_kb":      strconv.Itoa(c.CacheMaxItemSizeKB),
-		"cache_compression_enabled":   strconv.FormatBool(c.CacheCompressionEnabled),
-		"cache_embeddings_ttl_hours":  strconv.Itoa(c.CacheEmbeddingsTTLHours),
-		"referee_enabled":             strconv.FormatBool(c.RefereeEnabled),
-		"referee_min_responses":       strconv.Itoa(c.RefereeMinResponses),
-		"referee_timeout_ms":          strconv.Itoa(c.RefereeTimeoutMS),
-		"referee_max_providers":       strconv.Itoa(c.RefereeMaxProviders),
-		"referee_default_model":       c.RefereeDefaultModel,
+		"admin_bind_address":         c.AdminBindAddress,
+		"admin_port":                 strconv.Itoa(c.AdminPort),
+		"proxy_bind_address":         c.ProxyBindAddress,
+		"proxy_port":                 strconv.Itoa(c.ProxyPort),
+		"data_dir":                   c.DataDir,
+		"log_level":                  c.LogLevel,
+		"log_format":                 c.LogFormat,
+		"failover_enabled":           strconv.FormatBool(c.FailoverEnabled),
+		"max_retries":                strconv.Itoa(c.MaxRetries),
+		"circuit_breaker_enabled":    strconv.FormatBool(c.CircuitBreakerEnabled),
+		"circuit_breaker_threshold":  strconv.Itoa(c.CircuitBreakerThreshold),
+		"health_check_enabled":       strconv.FormatBool(c.HealthCheckEnabled),
+		"health_check_interval_ms":   strconv.Itoa(c.HealthCheckIntervalMS),
+		"prometheus_enabled":         strconv.FormatBool(c.PrometheusEnabled),
+		"prometheus_port":            strconv.Itoa(c.PrometheusPort),
+		"cache_enabled":              strconv.FormatBool(c.CacheEnabled),
+		"cache_max_size":             strconv.Itoa(c.CacheMaxSize),
+		"cache_max_memory_mb":        strconv.Itoa(c.CacheMaxMemoryMB),
+		"cache_ttl_seconds":          strconv.Itoa(c.CacheTTLSeconds),
+		"cache_max_item_size_kb":     strconv.Itoa(c.CacheMaxItemSizeKB),
+		"cache_compression_enabled":  strconv.FormatBool(c.CacheCompressionEnabled),
+		"cache_embeddings_ttl_hours": strconv.Itoa(c.CacheEmbeddingsTTLHours),
+		"referee_enabled":            strconv.FormatBool(c.RefereeEnabled),
+		"referee_min_responses":      strconv.Itoa(c.RefereeMinResponses),
+		"referee_timeout_ms":         strconv.Itoa(c.RefereeTimeoutMS),
+		"referee_max_providers":      strconv.Itoa(c.RefereeMaxProviders),
+		"referee_default_model":      c.RefereeDefaultModel,
 	}
 }
 

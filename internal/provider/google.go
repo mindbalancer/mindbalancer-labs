@@ -21,9 +21,9 @@ type Google struct {
 
 // GeminiRequest represents a Gemini API request.
 type GeminiRequest struct {
-	Contents         []GeminiContent   `json:"contents"`
-	GenerationConfig *GeminiGenConfig  `json:"generationConfig,omitempty"`
-	SafetySettings   []GeminiSafety    `json:"safetySettings,omitempty"`
+	Contents         []GeminiContent  `json:"contents"`
+	GenerationConfig *GeminiGenConfig `json:"generationConfig,omitempty"`
+	SafetySettings   []GeminiSafety   `json:"safetySettings,omitempty"`
 }
 
 // GeminiContent represents Gemini content.
@@ -337,8 +337,11 @@ func (p *Google) Completion(ctx context.Context, req *openai.CompletionRequest) 
 }
 
 func (p *Google) Embedding(ctx context.Context, req *openai.EmbeddingRequest) (*openai.EmbeddingResponse, error) {
-	// Google has embedding models but different API format
-	// TODO: Implement Google embeddings
+	// Google exposes embedding models but with a different (non-OpenAI) API shape.
+	// Until that translation is implemented, report the capability as unsupported
+	// (see SupportsEmbeddings) so the proxy rejects with a clean 400 rather than
+	// reaching this path. Kept here as a guard.
+	// TODO: Implement Google (Gemini) embeddings via the :embedContent endpoint.
 	return nil, fmt.Errorf("google embeddings not yet implemented")
 }
 
@@ -360,5 +363,7 @@ func (p *Google) SupportsStreaming() bool {
 }
 
 func (p *Google) SupportsEmbeddings() bool {
-	return true
+	// OpenAI-compatible embeddings are not yet implemented for Gemini; advertise
+	// false so the proxy returns a clean 400 instead of a 500 from Embedding().
+	return false
 }

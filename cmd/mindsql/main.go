@@ -331,7 +331,7 @@ func isSpecialCommand(cmd string) bool {
 }
 
 func printHelp() {
-	fmt.Println(`
+	fmt.Print(`
 MindBalancer Admin Commands
 ===========================
 

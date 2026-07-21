@@ -87,7 +87,8 @@ func (c *Checker) run(ctx context.Context) {
 }
 
 func (c *Checker) checkAll(ctx context.Context) {
-	servers, err := c.storage.GetServers(ctx, nil)
+	// Decrypt keys: provider-specific health probes authenticate against upstreams.
+	servers, err := c.storage.GetServersWithDecryptedKeys(ctx, nil)
 	if err != nil {
 		return
 	}

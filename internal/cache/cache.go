@@ -56,17 +56,17 @@ func DefaultConfig() Config {
 
 // Entry represents a cached response.
 type Entry struct {
-	Key          string
-	Value        []byte
-	Model        string
-	Endpoint     string
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
-	LastAccess   time.Time
-	HitCount     int64
-	Size         int64 // Original size
-	StoredSize   int64 // Size after compression
-	Compressed   bool
+	Key        string
+	Value      []byte
+	Model      string
+	Endpoint   string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastAccess time.Time
+	HitCount   int64
+	Size       int64 // Original size
+	StoredSize int64 // Size after compression
+	Compressed bool
 }
 
 // IsExpired returns true if the entry has expired.
@@ -76,23 +76,23 @@ func (e *Entry) IsExpired() bool {
 
 // shard represents a single cache shard with its own lock.
 type shard struct {
-	mu       sync.RWMutex
-	items    map[string]*list.Element
-	lru      *list.List
-	size     int64 // Current memory usage in bytes
+	mu    sync.RWMutex
+	items map[string]*list.Element
+	lru   *list.List
+	size  int64 // Current memory usage in bytes
 }
 
 // Stats holds cache statistics.
 type Stats struct {
-	Hits              int64   `json:"hits"`
-	Misses            int64   `json:"misses"`
-	Evictions         int64   `json:"evictions"`
-	DeduplicatedReqs  int64   `json:"deduplicated_requests"`
-	CompressionSaved  int64   `json:"compression_saved_bytes"`
-	MemoryUsed        int64   `json:"memory_used_bytes"`
-	ItemCount         int     `json:"item_count"`
-	HitRate           float64 `json:"hit_rate"`
-	AvgItemSize       float64 `json:"avg_item_size_bytes"`
+	Hits             int64   `json:"hits"`
+	Misses           int64   `json:"misses"`
+	Evictions        int64   `json:"evictions"`
+	DeduplicatedReqs int64   `json:"deduplicated_requests"`
+	CompressionSaved int64   `json:"compression_saved_bytes"`
+	MemoryUsed       int64   `json:"memory_used_bytes"`
+	ItemCount        int     `json:"item_count"`
+	HitRate          float64 `json:"hit_rate"`
+	AvgItemSize      float64 `json:"avg_item_size_bytes"`
 }
 
 // inflight represents an in-flight request for deduplication.

@@ -70,7 +70,7 @@ func (l *Limiter) Allow(ctx context.Context, username string) (*Result, error) {
 
 	now := time.Now()
 	window, ok := l.windows[username]
-	
+
 	// Create new window or reset if expired
 	if !ok || now.Sub(window.WindowStart) >= time.Minute {
 		window = &Window{

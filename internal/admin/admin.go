@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,20 @@ type Admin struct {
 
 // NewAdmin creates a new admin interface.
 func NewAdmin(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer, hc *health.Checker, cm *circuit.Manager, rtr *router.Router) *Admin {
+	auth := NewAuthenticator(cfg.AdminUsername, cfg.AdminPasswordHash)
+
+	// If no admin_password_hash was configured, a random bootstrap password was
+	// generated. Surface it prominently so the operator can log in, and nudge
+	// them to configure a stable credential.
+	if pw := auth.GeneratedPassword(); pw != "" {
+		log.Printf("========================================================================")
+		log.Printf("WARNING: no admin_password_hash configured. Generated a temporary admin")
+		log.Printf("         password for this run. Set admin_password_hash in your config")
+		log.Printf("         for a stable credential (mindbalancer -hash-password).")
+		log.Printf("         Login: username=%q password=%q", cfg.AdminUsername, pw)
+		log.Printf("========================================================================")
+	}
+
 	return &Admin{
 		config:        cfg,
 		storage:       store,
@@ -40,14 +55,20 @@ func NewAdmin(cfg *config.Config, store *storage.Storage, bal *balancer.Balancer
 		health:        hc,
 		circuits:      cm,
 		router:        rtr,
-		sessions:      NewSessionManager(),
-		authenticator: NewAuthenticator(cfg.AdminUsername, cfg.AdminPasswordHash),
+		sessions:      NewSessionManager(cfg.TLSEnabled),
+		authenticator: auth,
 	}
 }
 
 // SetCache sets the cache instance for admin management.
 func (a *Admin) SetCache(c *cache.Cache) {
 	a.cache = c
+}
+
+// GeneratedPassword returns the auto-generated bootstrap admin password, or ""
+// if an admin_password_hash was configured. Shared with the MySQL admin server.
+func (a *Admin) GeneratedPassword() string {
+	return a.authenticator.GeneratedPassword()
 }
 
 // Handler returns the HTTP handler for admin interface.
@@ -95,16 +116,16 @@ func (a *Admin) Handler() http.Handler {
 func (a *Admin) handleStatic(w http.ResponseWriter, r *http.Request) {
 	// Get the file path
 	filePath := strings.TrimPrefix(r.URL.Path, "/static/")
-	
+
 	// Security: prevent directory traversal
 	if strings.Contains(filePath, "..") {
 		http.NotFound(w, r)
 		return
 	}
-	
+
 	// Serve from web/static directory
 	fullPath := "web/static/" + filePath
-	
+
 	// Set content type based on extension
 	if strings.HasSuffix(filePath, ".png") {
 		w.Header().Set("Content-Type", "image/png")
@@ -117,10 +138,10 @@ func (a *Admin) handleStatic(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(filePath, ".js") {
 		w.Header().Set("Content-Type", "application/javascript")
 	}
-	
+
 	// Cache for 1 hour
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	
+
 	http.ServeFile(w, r, fullPath)
 }
 
@@ -152,8 +173,29 @@ func (a *Admin) handleRoot(w http.ResponseWriter, r *http.Request) {
 	a.writeError(w, http.StatusNotFound, "Not found")
 }
 
+// setSecurityHeaders applies defense-in-depth headers to HTML dashboard
+// responses. The dashboards rely on inline scripts, so script-src permits
+// 'unsafe-inline'; user-derived values are additionally HTML-escaped at render
+// time (see escapeHtml/escapeAttr in the page JS). The CSP still blocks external
+// script/object loads, framing (clickjacking), and base-tag hijacking.
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self' 'unsafe-inline'; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"object-src 'none'; "+
+			"base-uri 'self'; "+
+			"frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "same-origin")
+}
+
 // handleMonitoring serves the public monitoring dashboard.
 func (a *Admin) handleMonitoring(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(monitoringHTML))
 }
@@ -172,6 +214,7 @@ func (a *Admin) handleAdminPanel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(adminPanelHTML))
 }
@@ -185,6 +228,7 @@ func (a *Admin) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Serve login page
+		setSecurityHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(loginHTML))
 		return
@@ -679,16 +723,16 @@ func (a *Admin) handleCache(w http.ResponseWriter, r *http.Request) {
 		// Get cache status and stats
 		stats := a.cache.Stats()
 		response := map[string]any{
-			"enabled":            a.cache.IsEnabled(),
-			"hits":               stats.Hits,
-			"misses":             stats.Misses,
-			"hit_rate":           stats.HitRate,
-			"evictions":          stats.Evictions,
-			"deduplicated_reqs":  stats.DeduplicatedReqs,
-			"compression_saved":  stats.CompressionSaved,
-			"memory_used_bytes":  stats.MemoryUsed,
-			"item_count":         stats.ItemCount,
-			"avg_item_size":      stats.AvgItemSize,
+			"enabled":           a.cache.IsEnabled(),
+			"hits":              stats.Hits,
+			"misses":            stats.Misses,
+			"hit_rate":          stats.HitRate,
+			"evictions":         stats.Evictions,
+			"deduplicated_reqs": stats.DeduplicatedReqs,
+			"compression_saved": stats.CompressionSaved,
+			"memory_used_bytes": stats.MemoryUsed,
+			"item_count":        stats.ItemCount,
+			"avg_item_size":     stats.AvgItemSize,
 		}
 		a.writeJSON(w, response)
 
@@ -1046,7 +1090,7 @@ func maskAPIKey(key string) string {
 func (a *Admin) executeInsertServer(ctx context.Context, command string) (string, error) {
 	// Parse: INSERT INTO ai_servers (cols) VALUES (vals)
 	// Simple parser for: INSERT INTO ai_servers (name, provider_type, endpoint, api_key_encrypted, hostgroup, weight) VALUES ('name', 'type', 'url', 'key', 0, 1)
-	
+
 	upper := strings.ToUpper(command)
 	valuesIdx := strings.Index(upper, "VALUES")
 	if valuesIdx == -1 {
@@ -1055,7 +1099,7 @@ func (a *Admin) executeInsertServer(ctx context.Context, command string) (string
 
 	valuesPart := command[valuesIdx+6:]
 	valuesPart = strings.TrimSpace(valuesPart)
-	
+
 	// Remove parentheses
 	valuesPart = strings.TrimPrefix(valuesPart, "(")
 	valuesPart = strings.TrimSuffix(valuesPart, ")")
@@ -1133,7 +1177,7 @@ func parseCSVValues(s string) []string {
 
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		
+
 		if !inQuote && (c == '\'' || c == '"') {
 			inQuote = true
 			quoteChar = c
@@ -1148,7 +1192,7 @@ func parseCSVValues(s string) []string {
 			current.WriteByte(c)
 		}
 	}
-	
+
 	if current.Len() > 0 {
 		values = append(values, strings.TrimSpace(current.String()))
 	}

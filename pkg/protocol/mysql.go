@@ -3,10 +3,15 @@ package protocol
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -21,15 +26,22 @@ type CommandHandler interface {
 type MySQLServer struct {
 	listener net.Listener
 	handler  CommandHandler
+	username string
+	password string // plaintext credential; empty => loopback-only access
 	wg       sync.WaitGroup
 	quit     chan struct{}
 }
 
-// NewMySQLServer creates a new MySQL protocol server.
-func NewMySQLServer(handler CommandHandler) *MySQLServer {
+// NewMySQLServer creates a new MySQL protocol server. The username/password are
+// verified against the client's mysql_native_password handshake response. If
+// password is empty, connections are accepted only from loopback (fail-closed
+// for anything remote).
+func NewMySQLServer(handler CommandHandler, username, password string) *MySQLServer {
 	return &MySQLServer{
-		handler: handler,
-		quit:    make(chan struct{}),
+		handler:  handler,
+		username: username,
+		password: password,
+		quit:     make(chan struct{}),
 	}
 }
 
@@ -55,6 +67,65 @@ func (s *MySQLServer) Stop() error {
 	}
 	s.wg.Wait()
 	return nil
+}
+
+// authorize decides whether a connection may proceed. When a password is
+// configured, the client's mysql_native_password response is verified against
+// it. When no password is configured, only loopback connections are allowed.
+func (s *MySQLServer) authorize(conn net.Conn, username string, authResp, scramble []byte) bool {
+	if s.username != "" && username != s.username {
+		return false
+	}
+
+	if s.password == "" {
+		// No verifiable credential: restrict to loopback and warn.
+		if !isLoopbackConn(conn) {
+			log.Printf("admin(mysql): rejected non-loopback connection from %s (no admin_password configured)", conn.RemoteAddr())
+			return false
+		}
+		return true
+	}
+
+	return verifyNativePassword(s.password, scramble, authResp)
+}
+
+func isLoopbackConn(conn net.Conn) bool {
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// verifyNativePassword verifies a mysql_native_password auth response:
+//
+//	response = SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))
+//
+// The server recovers SHA1(password) and checks SHA1 of it equals the stored
+// double hash, in constant time.
+func verifyNativePassword(password string, scramble, authResp []byte) bool {
+	if len(authResp) == 0 {
+		return password == ""
+	}
+	if len(authResp) != sha1.Size || len(scramble) == 0 {
+		return false
+	}
+
+	stage1 := sha1.Sum([]byte(password)) // SHA1(password)
+	stage2 := sha1.Sum(stage1[:])        // SHA1(SHA1(password))
+
+	h := sha1.New()
+	h.Write(scramble)
+	h.Write(stage2[:])
+	token := h.Sum(nil) // SHA1(scramble + stage2)
+
+	recovered := make([]byte, sha1.Size)
+	for i := range recovered {
+		recovered[i] = authResp[i] ^ token[i]
+	}
+	check := sha1.Sum(recovered) // should equal stage2
+	return subtle.ConstantTimeCompare(check[:], stage2[:]) == 1
 }
 
 func (s *MySQLServer) acceptLoop() {
@@ -86,18 +157,30 @@ func (s *MySQLServer) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
 
+	scramble := make([]byte, 20)
+	if _, err := rand.Read(scramble); err != nil {
+		return
+	}
+
 	client := &mysqlClient{
-		conn:    conn,
-		reader:  bufio.NewReader(conn),
-		handler: s.handler,
-		seq:     0,
+		conn:     conn,
+		reader:   bufio.NewReader(conn),
+		handler:  s.handler,
+		seq:      0,
+		scramble: scramble,
 	}
 
 	if err := client.sendHandshake(); err != nil {
 		return
 	}
 
-	if err := client.readHandshakeResponse(); err != nil {
+	username, authResp, err := client.readHandshakeResponse()
+	if err != nil {
+		return
+	}
+
+	if !s.authorize(conn, username, authResp, client.scramble) {
+		_ = client.sendError(1045, "Access denied for user")
 		return
 	}
 
@@ -120,11 +203,12 @@ func (s *MySQLServer) handleConnection(conn net.Conn) {
 }
 
 type mysqlClient struct {
-	conn    net.Conn
-	reader  *bufio.Reader
-	handler CommandHandler
-	seq     byte
-	seqSet  bool // track if we've read a packet to know the sequence
+	conn     net.Conn
+	reader   *bufio.Reader
+	handler  CommandHandler
+	seq      byte
+	seqSet   bool   // track if we've read a packet to know the sequence
+	scramble []byte // 20-byte auth challenge sent in the handshake
 }
 
 const (
@@ -134,29 +218,70 @@ const (
 )
 
 func (c *mysqlClient) sendHandshake() error {
-	// Simple handshake packet
-	packet := []byte{
-		10,                                        // Protocol version
-		'5', '.', '7', '.', '0', '-', 'M', 'i', 'n', 'd', 'B', 'a', 'l', 'a', 'n', 'c', 'e', 'r', 0, // Server version
-		1, 0, 0, 0, // Connection ID
-		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', // Auth plugin data part 1
-		0,          // Filler
-		0xff, 0xf7, // Capability flags (lower 2 bytes)
-		0x21,       // Character set (utf8)
-		0x02, 0x00, // Status flags
-		0x00, 0x00, // Capability flags (upper 2 bytes)
-		0x15, // Length of auth plugin data
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // Reserved
-		'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 0, // Auth plugin data part 2
-		'm', 'y', 's', 'q', 'l', '_', 'n', 'a', 't', 'i', 'v', 'e', '_', 'p', 'a', 's', 's', 'w', 'o', 'r', 'd', 0, // Auth plugin name
-	}
+	// Handshake v10. The 20-byte scramble is split into an 8-byte part 1 and a
+	// 12-byte part 2 (per the protocol), and the client re-joins them.
+	part1 := c.scramble[:8]
+	part2 := c.scramble[8:20]
+
+	packet := make([]byte, 0, 128)
+	packet = append(packet, 10) // Protocol version
+	packet = append(packet, []byte("5.7.0-MindBalancer")...)
+	packet = append(packet, 0)                   // NUL-terminated server version
+	packet = append(packet, 1, 0, 0, 0)          // Connection ID
+	packet = append(packet, part1...)            // Auth plugin data part 1 (8 bytes)
+	packet = append(packet, 0)                   // Filler
+	packet = append(packet, 0xff, 0xf7)          // Capability flags (lower 2 bytes)
+	packet = append(packet, 0x21)                // Character set (utf8)
+	packet = append(packet, 0x02, 0x00)          // Status flags
+	packet = append(packet, 0x00, 0x00)          // Capability flags (upper 2 bytes)
+	packet = append(packet, 0x15)                // Length of auth plugin data (21)
+	packet = append(packet, make([]byte, 10)...) // Reserved
+	packet = append(packet, part2...)            // Auth plugin data part 2 (12 bytes)
+	packet = append(packet, 0)                   // NUL terminator for part 2
+	packet = append(packet, []byte("mysql_native_password")...)
+	packet = append(packet, 0) // NUL-terminated auth plugin name
 
 	return c.writePacket(packet)
 }
 
-func (c *mysqlClient) readHandshakeResponse() error {
-	_, err := c.readPacket()
-	return err
+// readHandshakeResponse reads the client's handshake response and returns the
+// username and the mysql_native_password auth response (scrambled password).
+func (c *mysqlClient) readHandshakeResponse() (string, []byte, error) {
+	data, err := c.readPacket()
+	if err != nil {
+		return "", nil, err
+	}
+	return parseHandshakeResponse(data)
+}
+
+// parseHandshakeResponse parses a protocol-41 HandshakeResponse packet.
+// Layout: 4 bytes capabilities, 4 bytes max packet, 1 byte charset, 23 bytes
+// filler, NUL-terminated username, then a 1-byte-length-prefixed auth response
+// (CLIENT_SECURE_CONNECTION form, which go-sql-driver uses here).
+func parseHandshakeResponse(data []byte) (string, []byte, error) {
+	const headerLen = 4 + 4 + 1 + 23
+	if len(data) < headerLen {
+		return "", nil, fmt.Errorf("handshake response too short")
+	}
+	pos := headerLen
+
+	nul := bytes.IndexByte(data[pos:], 0)
+	if nul < 0 {
+		return "", nil, fmt.Errorf("missing username terminator")
+	}
+	username := string(data[pos : pos+nul])
+	pos += nul + 1
+
+	var authResp []byte
+	if pos < len(data) {
+		l := int(data[pos])
+		pos++
+		if pos+l > len(data) {
+			return "", nil, fmt.Errorf("truncated auth response")
+		}
+		authResp = data[pos : pos+l]
+	}
+	return username, authResp, nil
 }
 
 func (c *mysqlClient) sendOK() error {
@@ -266,7 +391,7 @@ func (c *mysqlClient) makeLengthEncodedString(s string) []byte {
 func (c *mysqlClient) handleCommand() error {
 	// Reset sequence for each new command
 	c.seq = 0
-	
+
 	data, err := c.readPacket()
 	if err != nil {
 		return err
@@ -348,7 +473,7 @@ func (c *mysqlClient) writePacket(data []byte) error {
 	if _, err := c.conn.Write(data); err != nil {
 		return err
 	}
-	
+
 	c.seq++
 	return nil
 }

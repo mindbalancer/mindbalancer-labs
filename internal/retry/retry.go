@@ -11,11 +11,11 @@ import (
 
 // Config holds retry configuration.
 type Config struct {
-	MaxRetries     int
-	InitialDelay   time.Duration
-	MaxDelay       time.Duration
-	Multiplier     float64
-	Jitter         float64 // 0.0 to 1.0 - adds randomness to delay
+	MaxRetries   int
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
+	Multiplier   float64
+	Jitter       float64 // 0.0 to 1.0 - adds randomness to delay
 }
 
 // DefaultConfig returns sensible default retry configuration.
@@ -96,7 +96,7 @@ func Do[T any](ctx context.Context, cfg Config, fn func(ctx context.Context, att
 		// Don't sleep after the last attempt
 		if attempt < cfg.MaxRetries {
 			delay := calculateDelay(cfg, attempt)
-			
+
 			select {
 			case <-ctx.Done():
 				result.Err = ctx.Err()
@@ -122,7 +122,7 @@ func DoSimple(ctx context.Context, cfg Config, fn func(ctx context.Context) erro
 // calculateDelay calculates the delay for a given attempt with jitter.
 func calculateDelay(cfg Config, attempt int) time.Duration {
 	delay := float64(cfg.InitialDelay) * math.Pow(cfg.Multiplier, float64(attempt))
-	
+
 	// Apply max delay cap
 	if delay > float64(cfg.MaxDelay) {
 		delay = float64(cfg.MaxDelay)

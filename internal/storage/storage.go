@@ -26,9 +26,9 @@ type Storage struct {
 type ServerStatus string
 
 const (
-	ServerStatusOnline   ServerStatus = "ONLINE"
-	ServerStatusOffline  ServerStatus = "OFFLINE"
-	ServerStatusShunned  ServerStatus = "SHUNNED"
+	ServerStatusOnline  ServerStatus = "ONLINE"
+	ServerStatusOffline ServerStatus = "OFFLINE"
+	ServerStatusShunned ServerStatus = "SHUNNED"
 )
 
 // Server represents an AI server/provider.
@@ -87,21 +87,21 @@ type Hostgroup struct {
 
 // RequestLog represents a logged request.
 type RequestLog struct {
-	ID             int64
-	RequestID      string
-	Username       string
-	ServerName     string
-	Model          string
-	Endpoint       string
-	PromptTokens   int
-	OutputTokens   int
-	TotalTokens    int
-	LatencyMS      int64
-	FirstByteMS    int64
-	StatusCode     int
-	ErrorMessage   string
-	Streaming      bool
-	Timestamp      time.Time
+	ID           int64
+	RequestID    string
+	Username     string
+	ServerName   string
+	Model        string
+	Endpoint     string
+	PromptTokens int
+	OutputTokens int
+	TotalTokens  int
+	LatencyMS    int64
+	FirstByteMS  int64
+	StatusCode   int
+	ErrorMessage string
+	Streaming    bool
+	Timestamp    time.Time
 }
 
 // New creates a new Storage instance.

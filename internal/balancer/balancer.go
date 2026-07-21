@@ -42,14 +42,14 @@ type ServerState struct {
 
 // Balancer implements load balancing across AI servers.
 type Balancer struct {
-	mu          sync.RWMutex
-	storage     *storage.Storage
-	health      *health.Checker
-	circuits    *circuit.Manager
-	algorithm   Algorithm
-	servers     map[string]*ServerState
-	hostgroups  map[int][]*ServerState
-	rrCounters  map[int]*uint64 // Round-robin counters per hostgroup
+	mu         sync.RWMutex
+	storage    *storage.Storage
+	health     *health.Checker
+	circuits   *circuit.Manager
+	algorithm  Algorithm
+	servers    map[string]*ServerState
+	hostgroups map[int][]*ServerState
+	rrCounters map[int]*uint64 // Round-robin counters per hostgroup
 }
 
 // NewBalancer creates a new load balancer.
@@ -73,8 +73,10 @@ func NewBalancer(store *storage.Storage, healthChecker *health.Checker, circuitM
 }
 
 // LoadServers loads servers from storage into the balancer.
+// Keys are decrypted here because the balanced Server is handed to providers,
+// which use the API key directly as the upstream auth credential.
 func (b *Balancer) LoadServers(ctx context.Context) error {
-	servers, err := b.storage.GetServers(ctx, nil)
+	servers, err := b.storage.GetServersWithDecryptedKeys(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -393,9 +395,9 @@ func (b *Balancer) Stats() BalancerStats {
 	defer b.mu.RUnlock()
 
 	stats := BalancerStats{
-		Algorithm:     string(b.algorithm),
-		TotalServers:  len(b.servers),
-		ServerStats:   make([]ServerStats, 0, len(b.servers)),
+		Algorithm:      string(b.algorithm),
+		TotalServers:   len(b.servers),
+		ServerStats:    make([]ServerStats, 0, len(b.servers)),
 		HostgroupSizes: make(map[int]int),
 	}
 

@@ -742,7 +742,7 @@ const monitoringHTML = `<!DOCTYPE html>
                     '<td>' +
                         '<div class="server-cell">' +
                             '<div class="server-status ' + (isHealthy ? 'healthy' : 'unhealthy') + '"></div>' +
-                            '<span class="server-name">' + server.Name + '</span>' +
+                            '<span class="server-name">' + escapeHtml(server.Name) + '</span>' +
                         '</div>' +
                     '</td>' +
                     '<td><span class="badge ' + providerClass + '">' + providerName + '</span></td>' +
@@ -772,7 +772,7 @@ const monitoringHTML = `<!DOCTYPE html>
                 return '<div class="health-item">' +
                     '<div class="server-status ' + (status.Healthy ? 'healthy' : 'unhealthy') + '"></div>' +
                     '<div class="health-info">' +
-                        '<div class="health-name">' + name + '</div>' +
+                        '<div class="health-name">' + escapeHtml(name) + '</div>' +
                         '<div class="health-meta">' + (status.Healthy ? 'Healthy' : 'Unhealthy') + '</div>' +
                     '</div>' +
                     '<div class="health-latency">' + latencyDisplay + '</div>' +
@@ -794,14 +794,23 @@ const monitoringHTML = `<!DOCTYPE html>
                 
                 return '<div class="log-item">' +
                     '<span class="log-time">' + time + '</span>' +
-                    '<span class="log-server">' + (log.ServerName || '-') + '</span>' +
-                    '<span class="log-model">' + (log.Model || '-') + '</span>' +
+                    '<span class="log-server">' + escapeHtml(log.ServerName || '-') + '</span>' +
+                    '<span class="log-model">' + escapeHtml(log.Model || '-') + '</span>' +
                     '<span class="log-status ' + (isSuccess ? 'success' : 'error') + '">' + log.StatusCode + '</span>' +
                     '<span class="log-latency">' + log.LatencyMS + 'ms</span>' +
                 '</div>';
             }).join('');
         }
         
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function getProviderClass(name) {
             name = name.toLowerCase();
             if (name.indexOf('openai') >= 0) return 'badge-openai';

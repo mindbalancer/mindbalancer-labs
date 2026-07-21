@@ -43,14 +43,14 @@ type OllamaOptions struct {
 
 // OllamaChatResponse represents an Ollama chat response.
 type OllamaChatResponse struct {
-	Model     string        `json:"model"`
-	CreatedAt string        `json:"created_at"`
-	Message   OllamaMessage `json:"message"`
-	Done      bool          `json:"done"`
-	TotalDuration    int64 `json:"total_duration,omitempty"`
-	LoadDuration     int64 `json:"load_duration,omitempty"`
-	PromptEvalCount  int   `json:"prompt_eval_count,omitempty"`
-	EvalCount        int   `json:"eval_count,omitempty"`
+	Model           string        `json:"model"`
+	CreatedAt       string        `json:"created_at"`
+	Message         OllamaMessage `json:"message"`
+	Done            bool          `json:"done"`
+	TotalDuration   int64         `json:"total_duration,omitempty"`
+	LoadDuration    int64         `json:"load_duration,omitempty"`
+	PromptEvalCount int           `json:"prompt_eval_count,omitempty"`
+	EvalCount       int           `json:"eval_count,omitempty"`
 }
 
 // OllamaEmbeddingRequest represents an Ollama embedding request.

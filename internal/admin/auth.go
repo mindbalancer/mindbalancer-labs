@@ -4,6 +4,7 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -28,13 +29,14 @@ type SessionManager struct {
 	cookieSecure bool
 }
 
-// NewSessionManager creates a new session manager.
-func NewSessionManager() *SessionManager {
+// NewSessionManager creates a new session manager. When secure is true the
+// session cookie is marked Secure (send only over HTTPS); pass cfg.TLSEnabled.
+func NewSessionManager(secure bool) *SessionManager {
 	sm := &SessionManager{
 		sessions:     make(map[string]*Session),
 		sessionTTL:   24 * time.Hour,
 		cookieName:   "mindbalancer_session",
-		cookieSecure: false, // Set to true in production with HTTPS
+		cookieSecure: secure,
 	}
 
 	// Start cleanup goroutine
@@ -181,14 +183,45 @@ func (sm *SessionManager) AuthAPIMiddleware(next http.Handler) http.Handler {
 type Authenticator struct {
 	adminUsername     string
 	adminPasswordHash string
+	generatedPassword string // non-empty only when we auto-generated a password
 }
 
 // NewAuthenticator creates a new authenticator with the given credentials.
+//
+// Security: authentication is fail-closed. If no password hash is configured we
+// do NOT allow "any password" (the old dev-mode behavior). Instead we generate a
+// random one-time password, hash it, and expose it via GeneratedPassword() so the
+// server can log it on startup. Operators should set admin_password_hash for a
+// stable credential (see `mindbalancer -hash-password`).
 func NewAuthenticator(username, passwordHash string) *Authenticator {
-	return &Authenticator{
+	a := &Authenticator{
 		adminUsername:     username,
 		adminPasswordHash: passwordHash,
 	}
+
+	if passwordHash == "" {
+		pw, err := generateRandomPassword()
+		if err != nil {
+			// Extremely unlikely; degrade to a disabled (fail-closed) authenticator.
+			log.Printf("admin auth: failed to generate bootstrap password: %v", err)
+			return a
+		}
+		hash, err := HashPassword(pw)
+		if err != nil {
+			log.Printf("admin auth: failed to hash bootstrap password: %v", err)
+			return a
+		}
+		a.adminPasswordHash = hash
+		a.generatedPassword = pw
+	}
+
+	return a
+}
+
+// GeneratedPassword returns the auto-generated bootstrap password, or "" if a
+// password hash was configured. Log this once at startup.
+func (a *Authenticator) GeneratedPassword() string {
+	return a.generatedPassword
 }
 
 // Authenticate verifies the username and password.
@@ -198,14 +231,23 @@ func (a *Authenticator) Authenticate(username, password string) bool {
 		return false
 	}
 
-	// If no password hash is configured, allow any password (development mode)
+	// Fail closed if, for some reason, no hash is available.
 	if a.adminPasswordHash == "" {
-		return true
+		return false
 	}
 
-	// Verify password using bcrypt
+	// Verify password using bcrypt (constant-time comparison internally).
 	err := bcrypt.CompareHashAndPassword([]byte(a.adminPasswordHash), []byte(password))
 	return err == nil
+}
+
+// generateRandomPassword returns a URL-safe random password.
+func generateRandomPassword() (string, error) {
+	b := make([]byte, 18) // 144 bits of entropy
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // HashPassword generates a bcrypt hash for the given password.
@@ -268,7 +310,7 @@ const loginHTML = `<!DOCTYPE html>
             font-weight: 500;
             color: #333;
         }
-        input[type="text"] {
+        input[type="text"], input[type="password"] {
             width: 100%;
             padding: 12px;
             border: 1px solid #ddd;
@@ -331,8 +373,7 @@ const loginHTML = `<!DOCTYPE html>
             </div>
             <div class="form-group">
                 <label>Password</label>
-                <input type="text" name="password" placeholder="any password" required>
-                <div class="hint">Dev mode: any password works</div>
+                <input type="password" name="password" placeholder="Password" required>
             </div>
             <button type="submit">Sign In</button>
         </form>

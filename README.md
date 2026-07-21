@@ -14,7 +14,8 @@
 
 <p align="center">
   <a href="https://www.mindbalancer.org"><img src="https://img.shields.io/badge/Website-mindbalancer.org-7c3aed?style=flat-square" alt="Website"></a>
-  <a href="https://github.com/mindbalancer/mindbalancer-labs/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
+  <a href="https://github.com/mindbalancer/mindbalancer-labs/actions/workflows/ci.yml"><img src="https://github.com/mindbalancer/mindbalancer-labs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/mindbalancer/mindbalancer-labs/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green?style=flat-square" alt="License"></a>
   <a href="mailto:burak1607@gmail.com"><img src="https://img.shields.io/badge/Contact-burak1607%40gmail.com-blue?style=flat-square" alt="Contact"></a>
 </p>
 
@@ -108,7 +109,7 @@ MindBalancer is a high-performance, on-premise load balancer and reverse proxy f
 ```bash
 # 1. Clone the repository
 git clone https://github.com/mindbalancer/mindbalancer-labs.git
-cd mindbalancer
+cd mindbalancer-labs
 
 # 2. Build binaries
 make build
@@ -121,6 +122,19 @@ make build
 This creates:
 - `./bin/mindbalancer` — Main server
 - `./bin/mindsql` — Admin CLI
+
+### With Docker
+
+```bash
+# Build the image
+make docker-build           # or: docker build -t mindbalancer:dev .
+
+# Run (proxy 6034, admin HTTP 6033, admin MySQL 6032, metrics 9090)
+make docker-run
+```
+
+The image ships with `configs/mindbalancer.example.cnf` at
+`/etc/mindbalancer/mindbalancer.cnf`; mount your own config over it to customize.
 
 ---
 
@@ -186,12 +200,16 @@ Starting metrics server on :9090
 
 Open in browser: **http://localhost:6033/**
 
+Sign in at `/admin/login` with `admin` and your password. If you did not set
+`admin_password_hash`, a temporary password is printed to the server log at
+startup (look for the `Generated a temporary admin password` banner).
+
 ### 4. Add Your First Server
 
-Connect with mindsql:
+Connect with mindsql (use the same admin password when one is configured):
 
 ```bash
-./bin/mindsql
+./bin/mindsql -p 'your-admin-password'
 ```
 
 Add an OpenAI server:
@@ -339,9 +357,35 @@ default_tokens_per_minute = 100000
 # Metrics
 prometheus_enabled = true
 prometheus_port = 9090
+
+# Security
+admin_username = admin
+# bcrypt hash for the HTTP dashboard (generate with `mindbalancer -hash-password '...'`).
+# If empty, a random temporary password is generated and printed to the log at startup.
+admin_password_hash = ""
+# Plaintext credential for the MySQL admin protocol (mindsql). If empty, the MySQL
+# admin port accepts loopback connections only.
+admin_password = ""
+# >= 16 char key; enables AES-256-GCM encryption of stored provider API keys.
+api_key_encryption_key = ""
 ```
 
 See `configs/mindbalancer.example.cnf` for all options.
+
+### Security notes
+
+- **Admin plane binds to `127.0.0.1` by default.** To expose the admin dashboard
+  or MySQL port off-host, set a credential first (`admin_password_hash` for the
+  dashboard, `admin_password` for mindsql).
+- **Admin authentication is fail-closed.** With no `admin_password_hash`, a random
+  password is generated and logged once per start — set a stable hash for real use.
+- **Encrypt provider API keys at rest** by setting `api_key_encryption_key`.
+- Generate a dashboard password hash:
+
+  ```bash
+  ./bin/mindbalancer -hash-password 'your-strong-password'
+  # paste the output into admin_password_hash
+  ```
 
 ---
 
@@ -672,7 +716,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 ```bash
 # Development setup
 git clone https://github.com/mindbalancer/mindbalancer-labs.git
-cd mindbalancer
+cd mindbalancer-labs
 make build
 make test
 ```
@@ -681,7 +725,7 @@ make test
 
 ## License
 
-MIT License — See [LICENSE](LICENSE) for details.
+Apache License 2.0 — See [LICENSE](LICENSE) for details.
 
 ---
 

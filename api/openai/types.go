@@ -39,11 +39,11 @@ type RefereeConfig struct {
 
 // RefereeResponse contains metadata about referee mode execution.
 type RefereeResponse struct {
-	ProvidersQueried  int      `json:"providers_queried"`   // Number of providers queried
-	SuccessfulResponses int    `json:"successful_responses"` // Number of successful responses
-	FailedProviders   []string `json:"failed_providers,omitempty"` // List of failed provider names
-	RefereeModel      string   `json:"referee_model"`       // Model used as referee
-	SynthesisLatencyMS int64   `json:"synthesis_latency_ms"` // Time taken for synthesis
+	ProvidersQueried    int      `json:"providers_queried"`          // Number of providers queried
+	SuccessfulResponses int      `json:"successful_responses"`       // Number of successful responses
+	FailedProviders     []string `json:"failed_providers,omitempty"` // List of failed provider names
+	RefereeModel        string   `json:"referee_model"`              // Model used as referee
+	SynthesisLatencyMS  int64    `json:"synthesis_latency_ms"`       // Time taken for synthesis
 }
 
 // Message represents a chat message.
@@ -123,9 +123,9 @@ type Choice struct {
 
 // Usage represents token usage information.
 type Usage struct {
-	PromptTokens     int           `json:"prompt_tokens"`
-	CompletionTokens int           `json:"completion_tokens"`
-	TotalTokens      int           `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 }
 

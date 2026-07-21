@@ -93,7 +93,7 @@ dev-setup:
 	$(GOMOD) tidy
 	@echo "Installing development tools..."
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-	go install github.com/cosmtrek/air@latest
+	go install github.com/air-verse/air@latest
 	@echo "Development setup complete!"
 
 ## deps: Download dependencies
@@ -110,7 +110,7 @@ docker-build:
 ## docker-run: Run Docker container
 docker-run:
 	@echo "Running Docker container..."
-	docker run -d -p 6032:6032 -p 6033:6033 -p 9090:9090 --name mindbalancer mindbalancer:$(VERSION)
+	docker run -d -p 6032:6032 -p 6033:6033 -p 6034:6034 -p 9090:9090 --name mindbalancer mindbalancer:$(VERSION)
 
 ## release: Create release builds for multiple platforms
 release:

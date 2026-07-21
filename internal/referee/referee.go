@@ -135,7 +135,8 @@ func (e *Engine) Execute(ctx context.Context, req *openai.ChatCompletionRequest)
 
 // getServersForReferee returns servers filtered by provider types.
 func (e *Engine) getServersForReferee(ctx context.Context, providerTypes []string) ([]storage.Server, error) {
-	allServers, err := e.storage.GetServers(ctx, nil)
+	// Decrypt keys: referee fans out real provider calls using these credentials.
+	allServers, err := e.storage.GetServersWithDecryptedKeys(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +295,8 @@ func (e *Engine) buildSynthesisPrompt(originalReq *openai.ChatCompletionRequest,
 
 // findServerForModel finds a server that can run the specified model.
 func (e *Engine) findServerForModel(ctx context.Context, model string) (*storage.Server, error) {
-	servers, err := e.storage.GetServers(ctx, nil)
+	// Decrypt keys: the returned server is used to make an authenticated provider call.
+	servers, err := e.storage.GetServersWithDecryptedKeys(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -339,9 +341,9 @@ func guessProviderFromModel(model string) string {
 
 // Result holds the final referee mode result.
 type Result struct {
-	Response        *openai.ChatCompletionResponse
-	ProviderResults []ProviderResponse
-	TotalLatency    time.Duration
+	Response         *openai.ChatCompletionResponse
+	ProviderResults  []ProviderResponse
+	TotalLatency     time.Duration
 	SynthesisLatency time.Duration
 }
 
@@ -350,11 +352,11 @@ func (r *Result) GetProviderSummary() []map[string]interface{} {
 	var summary []map[string]interface{}
 	for _, pr := range r.ProviderResults {
 		entry := map[string]interface{}{
-			"provider":  pr.ProviderName,
-			"type":      pr.ProviderType,
-			"model":     pr.Model,
+			"provider":   pr.ProviderName,
+			"type":       pr.ProviderType,
+			"model":      pr.Model,
 			"latency_ms": pr.Latency.Milliseconds(),
-			"success":   pr.Error == nil,
+			"success":    pr.Error == nil,
 		}
 		if pr.Error != nil {
 			entry["error"] = pr.Error.Error()
@@ -367,9 +369,9 @@ func (r *Result) GetProviderSummary() []map[string]interface{} {
 // MarshalJSON implements custom JSON marshaling for Result.
 func (r *Result) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]interface{}{
-		"response":          r.Response,
-		"provider_summary":  r.GetProviderSummary(),
-		"total_latency_ms":  r.TotalLatency.Milliseconds(),
+		"response":             r.Response,
+		"provider_summary":     r.GetProviderSummary(),
+		"total_latency_ms":     r.TotalLatency.Milliseconds(),
 		"synthesis_latency_ms": r.SynthesisLatency.Milliseconds(),
 	})
 }

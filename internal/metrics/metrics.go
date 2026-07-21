@@ -38,18 +38,18 @@ type Collector struct {
 	errorsTotal *prometheus.CounterVec
 
 	// Cache metrics
-	cacheHits           prometheus.Counter
-	cacheMisses         prometheus.Counter
-	cacheEvictions      prometheus.Counter
-	cacheDeduplication  prometheus.Counter
-	cacheMemoryBytes    prometheus.Gauge
-	cacheItemCount      prometheus.Gauge
+	cacheHits             prometheus.Counter
+	cacheMisses           prometheus.Counter
+	cacheEvictions        prometheus.Counter
+	cacheDeduplication    prometheus.Counter
+	cacheMemoryBytes      prometheus.Gauge
+	cacheItemCount        prometheus.Gauge
 	cacheCompressionSaved prometheus.Counter
 
 	// Referee mode metrics
-	refereeRequestsTotal     *prometheus.CounterVec
-	refereeRequestDuration   prometheus.Histogram
-	refereeProvidersQueried  prometheus.Histogram
+	refereeRequestsTotal       *prometheus.CounterVec
+	refereeRequestDuration     prometheus.Histogram
+	refereeProvidersQueried    prometheus.Histogram
 	refereeSuccessfulResponses prometheus.Histogram
 
 	registry *prometheus.Registry
@@ -191,14 +191,14 @@ func NewCollector() *Collector {
 	// Initialize pricing (USD per 1K tokens) - Updated Jan 2025
 	c.pricing = map[string]ModelPricing{
 		// OpenAI
-		"gpt-4":               {InputPer1K: 0.03, OutputPer1K: 0.06},
-		"gpt-4-turbo":         {InputPer1K: 0.01, OutputPer1K: 0.03},
-		"gpt-4o":              {InputPer1K: 0.005, OutputPer1K: 0.015},
-		"gpt-4o-mini":         {InputPer1K: 0.00015, OutputPer1K: 0.0006},
-		"gpt-3.5-turbo":       {InputPer1K: 0.0005, OutputPer1K: 0.0015},
-		"o1":                  {InputPer1K: 0.015, OutputPer1K: 0.06},
-		"o1-mini":             {InputPer1K: 0.003, OutputPer1K: 0.012},
-		"o1-preview":          {InputPer1K: 0.015, OutputPer1K: 0.06},
+		"gpt-4":         {InputPer1K: 0.03, OutputPer1K: 0.06},
+		"gpt-4-turbo":   {InputPer1K: 0.01, OutputPer1K: 0.03},
+		"gpt-4o":        {InputPer1K: 0.005, OutputPer1K: 0.015},
+		"gpt-4o-mini":   {InputPer1K: 0.00015, OutputPer1K: 0.0006},
+		"gpt-3.5-turbo": {InputPer1K: 0.0005, OutputPer1K: 0.0015},
+		"o1":            {InputPer1K: 0.015, OutputPer1K: 0.06},
+		"o1-mini":       {InputPer1K: 0.003, OutputPer1K: 0.012},
+		"o1-preview":    {InputPer1K: 0.015, OutputPer1K: 0.06},
 		// Anthropic
 		"claude-3-5-sonnet-20241022": {InputPer1K: 0.003, OutputPer1K: 0.015},
 		"claude-3-5-haiku-20241022":  {InputPer1K: 0.0008, OutputPer1K: 0.004},
@@ -429,7 +429,7 @@ func (c *Collector) GetModelPricing(model string) (ModelPricing, bool) {
 func (c *Collector) GetAllPricing() map[string]ModelPricing {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	result := make(map[string]ModelPricing, len(c.pricing))
 	for k, v := range c.pricing {
 		result[k] = v
@@ -492,10 +492,10 @@ func (c *Collector) RecordRefereeRequest(success bool, duration time.Duration, p
 
 // CostSummary holds cost summary information.
 type CostSummary struct {
-	TotalCost     float64
-	CostByModel   map[string]float64
-	CostByServer  map[string]float64
-	TotalTokens   int
-	InputTokens   int
-	OutputTokens  int
+	TotalCost    float64
+	CostByModel  map[string]float64
+	CostByServer map[string]float64
+	TotalTokens  int
+	InputTokens  int
+	OutputTokens int
 }

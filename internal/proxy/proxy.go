@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +38,9 @@ type Proxy struct {
 	ratelimit *ratelimit.Limiter
 	cache     *cache.Cache
 	referee   *referee.Engine
+
+	// activeRequests tracks in-flight proxy requests for graceful-drain on shutdown.
+	activeRequests int64
 }
 
 // NewProxy creates a new proxy.
@@ -76,6 +80,12 @@ func (p *Proxy) GetCache() *cache.Cache {
 	return p.cache
 }
 
+// ActiveRequests returns the number of in-flight proxy requests. Used by the
+// server's graceful-shutdown loop to drain traffic before exiting.
+func (p *Proxy) ActiveRequests() int64 {
+	return atomic.LoadInt64(&p.activeRequests)
+}
+
 // Handler returns the HTTP handler for the proxy.
 func (p *Proxy) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -93,7 +103,23 @@ func (p *Proxy) Handler() http.Handler {
 	// Root
 	mux.HandleFunc("/", p.handleRoot)
 
-	return mux
+	return p.trackActiveRequests(mux)
+}
+
+// trackActiveRequests wraps the handler to count in-flight requests so shutdown
+// can wait for them to drain. Health checks are excluded to keep the count to
+// real proxied traffic.
+func (p *Proxy) trackActiveRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/healthz", "/":
+			next.ServeHTTP(w, r)
+			return
+		}
+		atomic.AddInt64(&p.activeRequests, 1)
+		defer atomic.AddInt64(&p.activeRequests, -1)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +167,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
 			w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
-			p.writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", 
+			p.writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded",
 				fmt.Sprintf("Rate limit exceeded. Retry after %v", result.RetryAfter.Round(time.Second)))
 			return
 		}
@@ -703,8 +729,9 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Get all servers and aggregate models
-	servers, err := p.storage.GetServers(ctx, nil)
+	// Get all servers and aggregate models. Keys are decrypted because ListModels
+	// makes an authenticated upstream call per provider.
+	servers, err := p.storage.GetServersWithDecryptedKeys(ctx, nil)
 	if err != nil {
 		p.writeError(w, http.StatusInternalServerError, "internal_error", "Failed to get servers")
 		return

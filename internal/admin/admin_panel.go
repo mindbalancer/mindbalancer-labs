@@ -1184,6 +1184,24 @@ const adminPanelHTML = `<!DOCTYPE html>
     </div>
 
     <script>
+        // escapeHtml renders an untrusted value safely in HTML text context.
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+        // escapeAttr makes a value safe inside a double-quoted HTML attribute that
+        // contains a single-quoted JS string (e.g. onclick="fn('VALUE')"). The
+        // JS-string escaping survives the browser's attribute HTML-decode step.
+        function escapeAttr(value) {
+            return escapeHtml(String(value == null ? '' : value)
+                .replace(/\\/g, '\\\\')
+                .replace(/'/g, "\\'"));
+        }
+
         // Page Navigation
         function showPage(page) {
             document.querySelectorAll('.page').forEach(function(p) { p.classList.remove('active'); });
@@ -1309,7 +1327,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                         var statusClass = status.Healthy ? 'status-healthy' : 'status-unhealthy';
                         var latencyMs = status.Latency > 0 ? Math.round(status.Latency / 1000000) + 'ms' : '-';
                         healthHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#f8f9fa;border-radius:6px;border:1px solid #e0e0e0;">';
-                        healthHtml += '<div><span class="status ' + statusClass + '" style="margin-right:8px;"><span class="status-dot"></span>' + (status.Healthy ? 'OK' : 'Down') + '</span><strong>' + name + '</strong></div>';
+                        healthHtml += '<div><span class="status ' + statusClass + '" style="margin-right:8px;"><span class="status-dot"></span>' + (status.Healthy ? 'OK' : 'Down') + '</span><strong>' + escapeHtml(name) + '</strong></div>';
                         healthHtml += '<span class="mono" style="color:#666;">' + latencyMs + '</span>';
                         healthHtml += '</div>';
                     });
@@ -1357,15 +1375,15 @@ const adminPanelHTML = `<!DOCTYPE html>
                     var statusText = s.healthy ? 'Healthy' : 'Unhealthy';
                     
                     return '<tr>' +
-                        '<td><strong>' + s.name + '</strong></td>' +
-                        '<td><span class="provider-badge">' + s.provider_type + '</span></td>' +
-                        '<td class="mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + s.endpoint + '</td>' +
+                        '<td><strong>' + escapeHtml(s.name) + '</strong></td>' +
+                        '<td><span class="provider-badge">' + escapeHtml(s.provider_type) + '</span></td>' +
+                        '<td class="mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(s.endpoint) + '</td>' +
                         '<td>' + s.hostgroup + '</td>' +
                         '<td>' + s.weight + '</td>' +
                         '<td><span class="status ' + statusClass + '"><span class="status-dot"></span>' + statusText + '</span></td>' +
                         '<td class="actions">' +
-                            '<button class="btn-icon" onclick="editServer(\'' + s.name + '\')" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
-                            '<button class="btn-icon" onclick="deleteServer(\'' + s.name + '\')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
+                            '<button class="btn-icon" onclick="editServer(\'' + escapeAttr(s.name) + '\')" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
+                            '<button class="btn-icon" onclick="deleteServer(\'' + escapeAttr(s.name) + '\')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
                         '</td>' +
                     '</tr>';
                 }).join('');
@@ -1457,14 +1475,14 @@ const adminPanelHTML = `<!DOCTYPE html>
                     var statusText = u.active ? 'Active' : 'Inactive';
                     
                     return '<tr>' +
-                        '<td><strong>' + u.username + '</strong></td>' +
+                        '<td><strong>' + escapeHtml(u.username) + '</strong></td>' +
                         '<td><span class="status ' + statusClass + '">' + statusText + '</span></td>' +
                         '<td class="mono">' + formatNumber(u.max_requests_per_minute) + '</td>' +
                         '<td class="mono">' + formatNumber(u.max_tokens_per_minute) + '</td>' +
                         '<td>' + (u.default_hostgroup || 0) + '</td>' +
                         '<td class="actions">' +
-                            '<button class="btn-icon" onclick="editUser(\'' + u.username + '\')" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
-                            '<button class="btn-icon" onclick="deleteUser(\'' + u.username + '\')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
+                            '<button class="btn-icon" onclick="editUser(\'' + escapeAttr(u.username) + '\')" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
+                            '<button class="btn-icon" onclick="deleteUser(\'' + escapeAttr(u.username) + '\')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
                         '</td>' +
                     '</tr>';
                 }).join('');
@@ -1546,8 +1564,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     
                     return '<tr>' +
                         '<td class="mono">' + r.rule_id + '</td>' +
-                        '<td>' + (r.match_model || '*') + '</td>' +
-                        '<td>' + (r.match_pattern || '*') + '</td>' +
+                        '<td>' + escapeHtml(r.match_model || '*') + '</td>' +
+                        '<td>' + escapeHtml(r.match_pattern || '*') + '</td>' +
                         '<td>' + r.destination_hostgroup + '</td>' +
                         '<td>' + r.priority + '</td>' +
                         '<td><span class="status ' + statusClass + '">' + statusText + '</span></td>' +
@@ -1614,8 +1632,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                 tbody.innerHTML = hostgroups.map(function(h) {
                     return '<tr>' +
                         '<td class="mono">' + h.group_id + '</td>' +
-                        '<td><strong>' + h.name + '</strong></td>' +
-                        '<td>' + (h.comment || '-') + '</td>' +
+                        '<td><strong>' + escapeHtml(h.name) + '</strong></td>' +
+                        '<td>' + escapeHtml(h.comment || '-') + '</td>' +
                         '<td>' + (h.server_count || 0) + '</td>' +
                         '<td class="actions">' +
                             '<button class="btn-icon" onclick="deleteHostgroup(' + h.group_id + ')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
@@ -1676,10 +1694,10 @@ const adminPanelHTML = `<!DOCTYPE html>
                 
                 tbody.innerHTML = entries.map(function(entry) {
                     return '<tr>' +
-                        '<td class="mono">' + entry[0] + '</td>' +
-                        '<td class="mono">' + entry[1] + '</td>' +
+                        '<td class="mono">' + escapeHtml(entry[0]) + '</td>' +
+                        '<td class="mono">' + escapeHtml(entry[1]) + '</td>' +
                         '<td class="actions">' +
-                            '<button class="btn-icon" onclick="editVariable(\'' + entry[0] + '\', \'' + entry[1] + '\')" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
+                            '<button class="btn-icon" onclick="editVariable(\'' + escapeAttr(entry[0]) + '\', \'' + escapeAttr(entry[1]) + '\')" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
                         '</td>' +
                     '</tr>';
                 }).join('');
