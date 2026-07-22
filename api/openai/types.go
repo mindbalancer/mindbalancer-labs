@@ -30,11 +30,16 @@ type ChatCompletionRequest struct {
 
 // RefereeConfig configures the referee mode for consensus-based responses.
 type RefereeConfig struct {
-	Enabled      bool     `json:"enabled"`                 // Enable referee mode
-	RefereeModel string   `json:"referee_model"`           // Model to use as referee (e.g., "gpt-4o", "claude-3-opus")
-	Providers    []string `json:"providers,omitempty"`     // Provider types to query (e.g., ["openai", "anthropic"]). Empty = use all available
-	MinResponses int      `json:"min_responses,omitempty"` // Minimum successful responses required (default: 2)
-	TimeoutMS    int      `json:"timeout_ms,omitempty"`    // Per-provider timeout in ms (default: from config)
+	Enabled      bool     `json:"enabled"`             // Enable referee mode
+	RefereeModel string   `json:"referee_model"`       // Model to use as referee/judge (e.g., "gpt-4o")
+	Providers    []string `json:"providers,omitempty"` // Provider types to query (e.g., ["openai", "anthropic"]). Empty = use all available
+	// ProviderModels maps a provider type to the model to query it with, e.g.
+	// {"openai":"gpt-4o-mini","anthropic":"claude-haiku-4-5","google":"gemini-flash-latest"}.
+	// When set, each provider is queried with ITS OWN model; the referee model then
+	// synthesizes across them. Takes precedence over Providers + the top-level model.
+	ProviderModels map[string]string `json:"provider_models,omitempty"`
+	MinResponses   int               `json:"min_responses,omitempty"` // Minimum successful responses required (default: 2)
+	TimeoutMS      int               `json:"timeout_ms,omitempty"`    // Per-provider timeout in ms (default: from config)
 }
 
 // RefereeResponse contains metadata about referee mode execution.

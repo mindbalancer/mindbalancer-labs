@@ -95,8 +95,9 @@ func (p *Google) buildURL(model string, stream bool) string {
 		action = "streamGenerateContent"
 	}
 
-	return fmt.Sprintf("%s/v1beta/models/%s:%s?key=%s",
-		endpoint, model, action, p.Server.APIKeyEncrypted)
+	// Auth is sent via the X-goog-api-key header (works for all key formats,
+	// including newer AQ.* keys, and keeps the key out of URLs/logs).
+	return fmt.Sprintf("%s/v1beta/models/%s:%s", endpoint, model, action)
 }
 
 func (p *Google) convertToGemini(req *openai.ChatCompletionRequest) *GeminiRequest {
@@ -204,6 +205,7 @@ func (p *Google) ChatCompletion(ctx context.Context, req *openai.ChatCompletionR
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-goog-api-key", p.Server.APIKeyEncrypted)
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
@@ -237,6 +239,7 @@ func (p *Google) ChatCompletionStream(ctx context.Context, req *openai.ChatCompl
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-goog-api-key", p.Server.APIKeyEncrypted)
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {

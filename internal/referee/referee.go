@@ -53,20 +53,21 @@ func (e *Engine) Execute(ctx context.Context, req *openai.ChatCompletionRequest)
 
 	startTime := time.Now()
 
-	// Get available servers based on provider filter
-	servers, err := e.getServersForReferee(ctx, req.RefereeMode.Providers)
+	// Build the query targets: each is a (server, model) pair. When
+	// ProviderModels is set, every provider is queried with its own model.
+	targets, err := e.buildTargets(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get servers: %w", err)
 	}
 
-	if len(servers) == 0 {
+	if len(targets) == 0 {
 		return nil, fmt.Errorf("no servers available for referee mode")
 	}
 
 	// Limit to max providers
 	maxProviders := e.config.RefereeMaxProviders
-	if len(servers) > maxProviders {
-		servers = servers[:maxProviders]
+	if len(targets) > maxProviders {
+		targets = targets[:maxProviders]
 	}
 
 	// Determine timeout
@@ -82,7 +83,7 @@ func (e *Engine) Execute(ctx context.Context, req *openai.ChatCompletionRequest)
 	}
 
 	// Execute parallel requests
-	responses := e.executeParallel(ctx, req, servers, timeout)
+	responses := e.executeParallel(ctx, req, targets, timeout)
 
 	// Filter successful responses
 	var successfulResponses []ProviderResponse
@@ -120,7 +121,7 @@ func (e *Engine) Execute(ctx context.Context, req *openai.ChatCompletionRequest)
 
 	// Add referee metadata to response
 	synthesized.RefereeInfo = &openai.RefereeResponse{
-		ProvidersQueried:    len(servers),
+		ProvidersQueried:    len(targets),
 		SuccessfulResponses: len(successfulResponses),
 		FailedProviders:     failedProviders,
 		RefereeModel:        refereeModel,
@@ -128,7 +129,7 @@ func (e *Engine) Execute(ctx context.Context, req *openai.ChatCompletionRequest)
 	}
 
 	log.Printf("[REFEREE] Completed in %v: queried=%d, successful=%d, failed=%d, synthesis=%v",
-		time.Since(startTime), len(servers), len(successfulResponses), len(failedProviders), synthesisLatency)
+		time.Since(startTime), len(targets), len(successfulResponses), len(failedProviders), synthesisLatency)
 
 	return synthesized, nil
 }
@@ -170,19 +171,70 @@ func (e *Engine) getServersForReferee(ctx context.Context, providerTypes []strin
 	return filtered, nil
 }
 
-// executeParallel sends the request to all servers in parallel.
-func (e *Engine) executeParallel(ctx context.Context, req *openai.ChatCompletionRequest, servers []storage.Server, timeout time.Duration) []ProviderResponse {
+// refTarget is a single provider call: one server queried with one model.
+type refTarget struct {
+	server storage.Server
+	model  string
+}
+
+// buildTargets decides which servers to query and with which model each.
+//
+//   - If ProviderModels is set, each listed provider type is queried with its own
+//     model (one online server per provider type). This is the true cross-provider
+//     consensus: gpt-4o-mini to OpenAI, claude-* to Anthropic, gemini-* to Google.
+//   - Otherwise it falls back to the legacy behavior: every server of the filtered
+//     provider types is queried with the single top-level request model.
+func (e *Engine) buildTargets(ctx context.Context, req *openai.ChatCompletionRequest) ([]refTarget, error) {
+	// Decrypt keys: referee fans out real provider calls using these credentials.
+	allServers, err := e.storage.GetServersWithDecryptedKeys(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	var online []storage.Server
+	for _, srv := range allServers {
+		if srv.Status == storage.ServerStatusOnline {
+			online = append(online, srv)
+		}
+	}
+
+	pm := req.RefereeMode.ProviderModels
+	if len(pm) > 0 {
+		var targets []refTarget
+		for ptype, model := range pm {
+			if model == "" {
+				continue
+			}
+			// Pick one online server of this provider type.
+			for _, srv := range online {
+				if strings.EqualFold(srv.ProviderType, ptype) {
+					targets = append(targets, refTarget{server: srv, model: model})
+					break
+				}
+			}
+		}
+		return targets, nil
+	}
+
+	// Legacy path: filter by provider types, query all with the request model.
+	servers, err := e.getServersForReferee(ctx, req.RefereeMode.Providers)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]refTarget, 0, len(servers))
+	for _, srv := range servers {
+		targets = append(targets, refTarget{server: srv, model: req.Model})
+	}
+	return targets, nil
+}
+
+// executeParallel sends each target its own model in parallel.
+func (e *Engine) executeParallel(ctx context.Context, req *openai.ChatCompletionRequest, targets []refTarget, timeout time.Duration) []ProviderResponse {
 	var wg sync.WaitGroup
-	responses := make([]ProviderResponse, len(servers))
+	responses := make([]ProviderResponse, len(targets))
 
-	// Create a clean request without referee mode to avoid infinite loops
-	cleanReq := *req
-	cleanReq.RefereeMode = nil
-	cleanReq.Stream = false // Referee mode doesn't support streaming
-
-	for i, srv := range servers {
+	for i, t := range targets {
 		wg.Add(1)
-		go func(idx int, server storage.Server) {
+		go func(idx int, target refTarget) {
 			defer wg.Done()
 
 			provCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -190,25 +242,28 @@ func (e *Engine) executeParallel(ctx context.Context, req *openai.ChatCompletion
 
 			start := time.Now()
 
-			// Create provider
-			prov := provider.New(server, timeout)
+			// Per-target request: this provider's own model, no referee/stream.
+			provReq := *req
+			provReq.RefereeMode = nil
+			provReq.Stream = false
+			provReq.Model = target.model
 
-			// Execute request
-			resp, err := prov.ChatCompletion(provCtx, &cleanReq)
+			prov := provider.New(target.server, timeout)
+			resp, err := prov.ChatCompletion(provCtx, &provReq)
 
 			responses[idx] = ProviderResponse{
-				ProviderName: server.Name,
-				ProviderType: server.ProviderType,
-				Model:        cleanReq.Model,
+				ProviderName: target.server.Name,
+				ProviderType: target.server.ProviderType,
+				Model:        target.model,
 				Response:     resp,
 				Error:        err,
 				Latency:      time.Since(start),
 			}
 
 			if err == nil {
-				log.Printf("[REFEREE] Provider %s (%s) responded in %v", server.Name, server.ProviderType, responses[idx].Latency)
+				log.Printf("[REFEREE] Provider %s (%s, model=%s) responded in %v", target.server.Name, target.server.ProviderType, target.model, responses[idx].Latency)
 			}
-		}(i, srv)
+		}(i, t)
 	}
 
 	wg.Wait()
